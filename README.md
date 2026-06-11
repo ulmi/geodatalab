@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" width="480" alt="geodatalab">
+  <img src="images/logo_nobg.png" width="350" alt="geodatalab">
 </p>
 
 <h1 align="center">geodatalab</h1>
