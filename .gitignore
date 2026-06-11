@@ -1,0 +1,5 @@
+# Local user config — never commit
+.geodatalab
+
+# Claude Code internals
+.claude/

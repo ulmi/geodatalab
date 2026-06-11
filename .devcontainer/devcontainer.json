@@ -1,0 +1,52 @@
+{
+  "name": "geodatalab",
+
+  // Build the image first with: ./geodatalab.sh build
+  "image": "geodatalab:latest",
+
+  // The folder open in VS Code is mounted at /workspace inside the container.
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  // idle mode: container stays alive without JupyterLab.
+  // VS Code talks directly to ipykernel — no Jupyter server needed for notebooks.
+  "containerEnv": {
+    "GDL_MODE": "idle"
+  },
+  "overrideCommand": false,
+
+  // Image runs as root.
+  "remoteUser": "root",
+
+  // SELinux: disable label enforcement (Fedora, RHEL, etc.)
+  "runArgs": ["--security-opt=label=disable"],
+
+  // Forward port in case JupyterLab is started from the integrated terminal.
+  "forwardPorts": [8888],
+  "portsAttributes": {
+    "8888": {
+      "label": "JupyterLab",
+      "onAutoForward": "notify"
+    }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter",
+        "ms-toolsai.jupyter-keymap",
+        "ms-toolsai.jupyter-renderers"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/venv/bin/python",
+        "python.terminal.activateEnvironment": false,
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "jupyter.kernelSpecFindPaths": ["/venv/share/jupyter/kernels"]
+      }
+    }
+  },
+
+  "postCreateCommand": "echo '── geodatalab ready ──' && python --version && echo 'GDAL '$(gdal-config --version 2>/dev/null || echo 'not found')"
+}

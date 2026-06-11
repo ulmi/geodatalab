@@ -1,0 +1,4 @@
+# institute — lab + R/Julia interop
+# R and Julia installed via system packages in this profile
+-r lab.txt
+rpy2

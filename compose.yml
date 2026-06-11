@@ -1,0 +1,33 @@
+services:
+  gis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PROFILE: ${PROFILE:-lab}
+    image: geodatalab:${GDL_TAG:-latest}
+    container_name: geodatalab
+    ports:
+      - "${GDL_PORT:-8888}:8888"
+    volumes:
+      - ${WORKSPACE:-.}:/workspace:Z
+    environment:
+      - JUPYTER_TOKEN=${JUPYTER_TOKEN:-}
+      - GDL_MODE=${GDL_MODE:-server}
+    security_opt:
+      - label=disable
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "[ \"${GDL_MODE:-server}\" = idle ] || python3 -c \"import socket; socket.create_connection(('localhost', 8888), 2).close()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    # Uncomment to limit resources:
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 8G
+    #       cpus: "4.0"
+    #     reservations:
+    #       memory: 2G

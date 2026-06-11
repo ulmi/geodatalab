@@ -1,0 +1,8 @@
+# r+julia — lightweight: JupyterLab + R + Julia only, no heavy GIS Python stack
+# R and Julia installed via system packages in this profile
+jupyterlab
+ipykernel
+pandas
+numpy
+matplotlib
+scipy

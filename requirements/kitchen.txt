@@ -1,0 +1,21 @@
+# kitchen — Python GIS stack + JupyterLab + JupyterGIS + whitebox
+geopandas
+rasterio
+rioxarray
+xarray
+jupyterlab
+jupytergis
+ipykernel
+folium
+ipyleaflet
+matplotlib
+matplotlib-scalebar
+rasterstats
+seaborn
+bokeh
+dask
+scipy
+SQLAlchemy
+duckdb
+whitebox
+whitebox-workflows

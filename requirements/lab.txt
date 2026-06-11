@@ -1,0 +1,5 @@
+# lab — kitchen + scientific data formats
+# GRASS GIS and SAGA GIS installed via apt in this profile
+-r kitchen.txt
+netCDF4
+h5py
