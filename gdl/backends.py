@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from datetime import date
 from pathlib import Path
 from typing import Callable
@@ -425,8 +426,22 @@ class Pixi(Backend):
             run(self.px("update", *envs), out, env=self.clean_env())
         out("Wrote pixi.lock")
 
+    def _check_platform(self, inst: Instance) -> None:
+        """Clear error for a profile pixi.toml doesn't offer on this machine."""
+        m = platform.machine().lower()
+        here = {("linux", "x86_64"): "linux-64", ("linux", "aarch64"): "linux-aarch64",
+                ("darwin", "arm64"): "osx-arm64", ("darwin", "x86_64"): "osx-64",
+                ("win32", "amd64"): "win-64"}.get((sys.platform, m), f"{sys.platform}-{m}")
+        manifest = tomllib.loads(self.MANIFEST.read_text(encoding="utf-8"))
+        plats = (manifest.get("feature", {}).get(inst.env_name, {}).get("platforms")
+                 or manifest["workspace"]["platforms"])
+        if here not in plats:
+            raise GdlError(f"Profile '{inst.profile}' is not available on pixi for {here} "
+                           f"(only {', '.join(plats)}). Use the container backend or another profile.")
+
     def build(self, out, profile=None, no_cache=False):
         profile = profile or self.inst.profile
+        self._check_platform(dataclasses.replace(self.inst, profile=profile))
         self._guard_env(profile)
         if profile in ("lab", "institute"):
             out("Note: SAGA GIS is not on conda-forge — use the container backend for SAGA.")

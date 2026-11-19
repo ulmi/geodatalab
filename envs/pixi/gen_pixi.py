@@ -29,7 +29,12 @@ OUT = ROOT / "pixi.toml"
 
 PYTHON = "3.13.*"  # keep in sync with GDL_PYTHON in gdl/config.py (trixie python3)
 PROFILES = ["kitchen", "lab", "institute", "r+julia"]
-PLATFORMS = ["linux-64"]  # add "linux-aarch64", "osx-arm64" ... when needed
+PLATFORMS = ["linux-64", "osx-arm64", "win-64"]
+# conda-forge packages missing on some platforms: a profile containing one is
+# limited to the platforms listed here (found by `pixi lock` failing to solve).
+ONLY_ON = {
+    "julia": ["linux-64"],
+}
 
 # The manager (gdl/ package): default environment + tasks
 MANAGER = ["textual", "tomli-w"]
@@ -165,6 +170,9 @@ def render() -> str:
             else:
                 cname = RENAME.get(name, name)
                 conda[cname] = conda_dep(cname, rest)
+        plats = [p for p in PLATFORMS if all(p in ONLY_ON[n] for n in conda if n in ONLY_ON)]
+        if plats != PLATFORMS:
+            lines += ["", f"[feature.{feat}]", "platforms = [" + ", ".join(f'"{p}"' for p in plats) + "]"]
         lines += ["", f"[feature.{feat}.dependencies]", *conda.values()]
         if pypi:
             lines += ["", f"[feature.{feat}.pypi-dependencies]", *pypi.values()]

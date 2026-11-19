@@ -83,7 +83,7 @@ A `.geodatalab` file from the old `geodatalab.sh` is converted automatically on 
 | Backend | What runs | Notes |
 |---------|-----------|-------|
 | `container` | Podman (preferred) or Docker image on `debian:trixie-slim` | Full stack incl. GRASS, SAGA, PDAL, lasR. Linux, macOS (Docker Desktop / Podman machine), Windows |
-| `pixi` | conda-forge environment, Jupyter as a host process | No container runtime or root. **No SAGA yet** (not on conda-forge) and no lasR |
+| `pixi` | conda-forge environment, Jupyter as a host process | No container runtime or root. Linux x86-64, Apple Silicon Macs, Windows x64. **No SAGA yet** (not on conda-forge) and no lasR. `institute` and `r+julia` are Linux-only (no conda-forge Julia elsewhere) |
 
 `pixi.toml` is generated from the same `requirements/*.txt` the image uses, so you can also skip the manager: `pixi run -e lab jupyter lab`.
 

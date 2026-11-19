@@ -177,6 +177,22 @@ class TestRender(Base):
             render.build_root(i)
 
 
+class TestPixiPlatform(Base):
+    def test_profile_platforms(self):
+        from gdl.backends import Pixi
+        s = Settings(self.toml)
+        for plat, machine, profile, ok in [("darwin", "arm64", "institute", False),
+                                           ("win32", "AMD64", "lab", True),
+                                           ("linux", "x86_64", "r+julia", True)]:
+            be = Pixi(s, config.Instance(profile=profile, backend="pixi"))
+            with mock.patch("sys.platform", plat), mock.patch("platform.machine", lambda: machine):
+                if ok:
+                    be._check_platform(be.inst)
+                else:
+                    with self.assertRaises(GdlError):
+                        be._check_platform(be.inst)
+
+
 class TestTui(Base):
     def test_first_run_and_new_instance(self):
         import asyncio
