@@ -21,6 +21,12 @@ from .config import (BACKENDS, MODES, PROFILES, DataDir, GdlError, Instance, Set
 from .render import remove_state
 
 
+def logo() -> Text:
+    """The geodatalab globe (ANSI art from the original geodatalab.sh) + title."""
+    art = Text.from_ansi((Path(__file__).parent / "logo.ans").read_text(encoding="utf-8").rstrip("\n"))
+    return Text.assemble(art, "\n  ", ("geodatalab", "bold"), "  —  GIS Data Laboratory")
+
+
 def options(d: dict) -> list[tuple[str, str]]:
     return [(f"{k}  —  {v}", k) for k, v in d.items()]
 
@@ -58,6 +64,7 @@ class Setup(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
+            yield Static(logo(), classes="logo")
             yield Label("[b]Welcome to geodatalab[/b] — set up your workbench")
             yield Label("Backend")
             yield Select(options(BACKENDS), value="pixi", allow_blank=False, id="backend")
@@ -69,6 +76,7 @@ class Setup(ModalScreen):
                 yield Button("Create", variant="primary", id="ok")
 
     @on(Button.Pressed, "#ok")
+    @on(Input.Submitted, "#workspace")
     def create(self) -> None:
         self.dismiss({"backend": self.query_one("#backend", Select).value,
                       "profile": self.query_one("#profile", Select).value,
@@ -81,6 +89,7 @@ class GeodatalabApp(App):
     #tabs { width: 1fr; }
     #side { width: 44; border-right: solid $primary-darken-2; }
     #side Label { padding: 0 1; text-style: bold; }
+    .logo { height: auto; padding: 1 1 1 0; }
     #overview { padding: 1 2; height: auto; }
     .buttons { height: auto; padding: 0 1; }
     .buttons Button { margin-right: 1; }
@@ -91,7 +100,7 @@ class GeodatalabApp(App):
     #data-add #d-name { width: 20; }
     #data-add Checkbox, #data-add Button { width: auto; }
     #data { height: 1fr; }
-    #dialog { width: 72; height: auto; padding: 1 2; border: thick $primary; background: $surface; }
+    #dialog { width: 72; height: auto; max-height: 100%; overflow-y: auto; padding: 1 2; border: thick $primary; background: $surface; }
     Ask, Setup { align: center middle; }
     """
     BINDINGS = [
@@ -114,6 +123,7 @@ class GeodatalabApp(App):
         yield Header()
         with Horizontal():
             with Vertical(id="side"):
+                yield Static(logo(), classes="logo")
                 yield Label("Instances")
                 yield DataTable(id="instances", cursor_type="row", zebra_stripes=True)
             with TabbedContent(id="tabs"):

@@ -200,7 +200,7 @@ class TestTui(Base):
 
         async def go():
             app = GeodatalabApp()
-            async with app.run_test() as pilot:
+            async with app.run_test(size=(120, 50)) as pilot:
                 await pilot.pause()
                 await pilot.click("#ok")  # Setup screen: accept defaults
                 await pilot.pause()
