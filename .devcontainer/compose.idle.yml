@@ -1,0 +1,5 @@
+# Dev Containers overlay: keep the container alive without JupyterLab.
+services:
+  gis:
+    environment:
+      - GDL_MODE=idle

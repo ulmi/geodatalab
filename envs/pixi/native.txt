@@ -1,0 +1,32 @@
+# Native (non-pip) conda-forge packages per profile for the pixi backend.
+# The Python packages come from requirements/<profile>.txt (single source of
+# truth) — gen_pixi.py merges both. "@name" includes another section.
+#
+# Gaps vs the container image:
+#   saga    — not on conda-forge; needs a recipe (follow-up work)
+#   pylasr  — lasR Python bindings are not packaged; container only for now
+
+[base]
+gdal
+pdal
+python-pdal
+# keep PDAL's optional deps CPU-only (the GPU ceres build drags in CUDA)
+ceres-solver=*=cpu*
+
+[kitchen]
+@base
+
+[lab]
+@kitchen
+grass
+
+[institute]
+@lab
+r-base
+r-irkernel
+julia
+
+[r+julia]
+r-base
+r-irkernel
+julia

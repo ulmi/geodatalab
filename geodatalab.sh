@@ -1,23 +1,20 @@
 #!/usr/bin/env bash
+# geodatalab — GIS Data Laboratory control script (the only interface needed).
+#
+# One CLI, several backends:  container (podman/docker) · pixi · nix (planned)
+# Backend-specific code lives in lib/backend-*.sh; shared helpers in lib/common.sh.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/.geodatalab"
-COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
-CONTAINER_NAME="geodatalab"
-SERVICE_NAME="gis"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-RED=$'\033[0;31m'
-GREEN=$'\033[0;32m'
-YELLOW=$'\033[1;33m'
-BLUE=$'\033[0;34m'
-BOLD=$'\033[1m'
-NC=$'\033[0m'
-
-info()    { echo -e "${GREEN}[geodatalab]${NC} $*"; }
-warn()    { echo -e "${YELLOW}[geodatalab]${NC} $*"; }
-error()   { echo -e "${RED}[geodatalab]${NC} $*" >&2; }
-heading() { echo -e "\n${BOLD}$*${NC}"; }
+# shellcheck source=lib/common.sh
+source "${SCRIPT_DIR}/lib/common.sh"
+# shellcheck source=lib/backend-container.sh
+source "${SCRIPT_DIR}/lib/backend-container.sh"
+# shellcheck source=lib/backend-pixi.sh
+source "${SCRIPT_DIR}/lib/backend-pixi.sh"
+# shellcheck source=lib/backend-nix.sh
+source "${SCRIPT_DIR}/lib/backend-nix.sh"
 
 show_logo() {
     # Heredoc contains ANSI codes without their leading ESC byte (stripped by tooling).
@@ -39,161 +36,47 @@ LOGO
     echo
 }
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+_label() { if be_has label; then "${BACKEND}_label"; else echo "$BACKEND"; fi; }
 
-WORKSPACE=""
-PROFILE="lab"
-GDL_MODE="server"
-GDL_PORT="8888"
-IMAGE_TAG=""
-
-load_config() {
-    [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE" || true
+_restart_hint() {
+    if gdl_is_running; then warn "Restart to apply: $0 restart"; fi
 }
 
-save_config() {
-    cat > "$CONFIG_FILE" <<EOF
-WORKSPACE="${WORKSPACE}"
-PROFILE="${PROFILE}"
-GDL_MODE="${GDL_MODE}"
-GDL_PORT="${GDL_PORT:-8888}"
-IMAGE_TAG="${IMAGE_TAG:-}"
-EOF
-}
+# ── Backend ────────────────────────────────────────────────────────────────────
 
-# ── Image naming ───────────────────────────────────────────────────────────────
-# IMAGE_TAG stores the full tag suffix, e.g. "2025.06-lab" or "latest" or "".
-# Empty / "latest" both resolve to geodatalab:latest (backward-compatible).
-
-get_image_name() {
-    echo "geodatalab:${IMAGE_TAG:-latest}"
-}
-
-# ── Runtime detection ──────────────────────────────────────────────────────────
-
-RUNTIME=""
-COMPOSE=""
-
-detect_runtime() {
-    [[ -n "$RUNTIME" ]] && return
-    if command -v podman &>/dev/null; then
-        RUNTIME="podman"
-        if podman compose version &>/dev/null 2>&1; then
-            COMPOSE="podman compose"
-        elif command -v podman-compose &>/dev/null; then
-            COMPOSE="podman-compose"
-        else
-            error "podman found but no compose. Install: dnf install podman-compose"
+cmd_backend() {
+    load_config
+    if [[ -n "${1:-}" ]]; then
+        if ! validate_backend "$1"; then
+            error "Invalid backend: $1  (valid: ${BACKENDS[*]})"
             exit 1
         fi
-    elif command -v docker &>/dev/null; then
-        RUNTIME="docker"
-        if docker compose version &>/dev/null 2>&1; then
-            COMPOSE="docker compose"
-        elif command -v docker-compose &>/dev/null; then
-            COMPOSE="docker-compose"
-        else
-            error "docker found but no compose plugin."
+        if [[ "$1" != "$BACKEND" ]] && gdl_is_running; then
+            error "The ${BACKEND} workbench is running. Stop it first: $0 stop"
             exit 1
         fi
+        BACKEND="$1"
+        _CFG_BACKEND="$1"
+        save_config
+        info "Backend set to: $BACKEND"
+        echo "  Build the ${PROFILE} profile for it:  $0 build"
     else
-        error "No container runtime found. Install podman or docker."
-        exit 1
-    fi
-}
-
-compose_run() {
-    WORKSPACE="${WORKSPACE:-.}" \
-        PROFILE="${PROFILE:-lab}" \
-        GDL_MODE="${GDL_MODE:-server}" \
-        GDL_TAG="${IMAGE_TAG:-latest}" \
-        GDL_PORT="${GDL_PORT:-8888}" \
-        $COMPOSE -f "$COMPOSE_FILE" "$@"
-}
-
-is_running() {
-    [[ "$($RUNTIME inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" == "true" ]]
-}
-
-# Poll for container health instead of sleeping a fixed amount.
-# In idle mode (no Jupyter) just waits for the running state.
-_wait_healthy() {
-    local timeout=60 elapsed=0 status
-
-    if [[ "${GDL_MODE:-server}" == "idle" ]]; then
-        printf "  Waiting for container"
-        while ! is_running && [[ $elapsed -lt $timeout ]]; do
-            printf "."; sleep 1; elapsed=$((elapsed+1))
+        heading "Backends"
+        local b
+        for b in "${BACKENDS[@]}"; do
+            if [[ "$b" == "$BACKEND" ]]; then
+                printf "  ${GREEN}* ${BOLD}%-10s${NC}${GREEN} —  %s${NC}\n" "$b" "${BACKEND_DESC[$b]}"
+            else
+                printf "    %-10s —  %s\n" "$b" "${BACKEND_DESC[$b]}"
+            fi
         done
         echo ""
-        return 0
+        echo "  Change with: $0 backend <name>"
+        echo "  Workspace, data folders, profile, mode and port are shared by all backends."
     fi
-
-    printf "  Waiting for Jupyter"
-    while [[ $elapsed -lt $timeout ]]; do
-        status=$($RUNTIME inspect -f '{{.State.Health.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "")
-        case "$status" in
-            healthy)
-                echo " ready."
-                return 0
-                ;;
-            unhealthy)
-                echo " unhealthy."
-                warn "Check logs: $0 logs"
-                return 1
-                ;;
-        esac
-        printf "."; sleep 2; elapsed=$((elapsed+2))
-    done
-    echo ""
-    warn "Still starting — check: $0 logs"
-    return 0
 }
 
 # ── Workspace ──────────────────────────────────────────────────────────────────
-
-prompt_workspace() {
-    heading "Workspace setup"
-    echo "  The workspace is mounted into the container at /workspace."
-    echo "  Put your data, notebooks and project files there."
-    echo ""
-    read -rp "  Path (default: ${SCRIPT_DIR}): " ws
-    ws="${ws:-${SCRIPT_DIR}}"
-    ws="${ws/#\~/$HOME}"
-    ws="$(realpath -m "$ws")"
-
-    if [[ ! -d "$ws" ]]; then
-        read -rp "  Directory does not exist. Create it? [Y/n] " create
-        if [[ ! "$create" =~ ^[Nn]$ ]]; then
-            mkdir -p "$ws"
-            info "Created: $ws"
-        else
-            warn "Workspace not created. Using: $ws"
-        fi
-    fi
-    WORKSPACE="$ws"
-    save_config
-    info "Workspace set to: $WORKSPACE"
-}
-
-ensure_workspace() {
-    load_config
-    if [[ -z "${WORKSPACE:-}" ]]; then
-        warn "No workspace configured."
-        prompt_workspace
-    fi
-    if [[ ! -d "$WORKSPACE" ]]; then
-        warn "Workspace missing: $WORKSPACE"
-        read -rp "  Create it? [Y/n] " create
-        if [[ ! "$create" =~ ^[Nn]$ ]]; then
-            mkdir -p "$WORKSPACE"
-            info "Created: $WORKSPACE"
-        else
-            error "Workspace required. Run: $0 workspace /path"
-            exit 1
-        fi
-    fi
-}
 
 cmd_workspace() {
     load_config
@@ -201,8 +84,7 @@ cmd_workspace() {
         local ws="${1/#\~/$HOME}"
         ws="$(realpath -m "$ws")"
         if [[ ! -d "$ws" ]]; then
-            read -rp "  Directory does not exist. Create it? [Y/n] " create
-            if [[ ! "$create" =~ ^[Nn]$ ]]; then
+            if confirm "Directory does not exist. Create it?" Y; then
                 mkdir -p "$ws"
                 info "Created: $ws"
             fi
@@ -210,6 +92,7 @@ cmd_workspace() {
         WORKSPACE="$ws"
         save_config
         info "Workspace set to: $WORKSPACE"
+        _restart_hint
     else
         heading "Workspace"
         if [[ -n "${WORKSPACE:-}" ]]; then
@@ -223,36 +106,123 @@ cmd_workspace() {
     fi
 }
 
-# ── Profiles ───────────────────────────────────────────────────────────────────
+# ── Data folders ───────────────────────────────────────────────────────────────
 
-PROFILES=("kitchen" "lab" "institute" "r+julia")
-
-declare -A PROFILE_DESC=(
-    [kitchen]="Python GIS + JupyterLab + JupyterGIS + whitebox"
-    [lab]="kitchen + GRASS GIS · SAGA GIS"
-    [institute]="lab + R + Julia"
-    [r+julia]="JupyterLab + R + Julia only"
-)
-
-declare -A PROFILE_SIZE=(
-    [kitchen]="~1.6 GB"
-    [lab]="~2.2 GB"
-    [institute]="~4 GB"
-    [r+julia]="~2.5 GB"
-)
-
-declare -A PROFILE_SYS=(
-    [kitchen]="GDAL  PROJ"
-    [lab]="GDAL  PROJ  GRASS GIS  SAGA GIS"
-    [institute]="GDAL  PROJ  GRASS GIS  SAGA GIS  R  Julia"
-    [r+julia]="R  Julia"
-)
-
-validate_profile() {
-    local p="$1"
-    for v in "${PROFILES[@]}"; do [[ "$p" == "$v" ]] && return 0; done
-    return 1
+_data_ls() {
+    local e status
+    heading "Workbench layout"
+    printf "  %-22s -> %s  ${BLUE}(rw)${NC}\n" "workspace/" "${WORKSPACE:-not set}"
+    for e in "${GDL_DATA_DIRS[@]+"${GDL_DATA_DIRS[@]}"}"; do
+        _data_parse "$e"
+        if [[ -d "$_D_PATH" ]]; then status=""; else status="  ${RED}missing${NC}"; fi
+        printf "  %-22s -> %s  ${BLUE}(%s)${NC}%b\n" "data/${_D_NAME}/" "$_D_PATH" \
+            "$([[ $_D_RO -eq 1 ]] && echo ro || echo rw)" "$status"
+    done
+    [[ ${#GDL_DATA_DIRS[@]} -eq 0 ]] && echo "  (no data folders — add one: $0 data add <name> <path> [--ro])"
+    echo "  Jupyter opens in:      ${GDL_OPEN:-/ (workbench root)}"
 }
+
+cmd_data() {
+    load_config
+    local sub="${1:-ls}"
+    [[ $# -gt 0 ]] && shift
+    case "$sub" in
+        ls|list)
+            _data_ls
+            echo ""
+            echo "  In notebooks (any backend):"
+            echo "    from pathlib import Path; import os"
+            echo "    Path(os.environ['GDL_DATA']) / '<name>'      # or os.environ['GDL_DATA_<NAME>']"
+            ;;
+        add)
+            local name="${1:-}" path="${2:-}" ro=0
+            [[ "${3:-}" == "--ro" || "${2:-}" == "--ro" ]] && ro=1
+            [[ "$path" == "--ro" ]] && path="${3:-}"
+            if [[ -z "$name" || -z "$path" ]]; then
+                error "Usage: $0 data add <name> <path> [--ro]"; exit 1
+            fi
+            if ! [[ "$name" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || [[ "$name" == "dirs" ]]; then
+                error "Invalid name '${name}': use lowercase letters, digits, - and _ (not 'dirs')."
+                exit 1
+            fi
+            if [[ "$(_data_index "$name")" != "-1" ]]; then
+                error "Data folder '${name}' already exists. Remove it first: $0 data rm ${name}"
+                exit 1
+            fi
+            path="${path/#\~/$HOME}"
+            path="$(realpath -m "$path")"
+            if [[ ! -d "$path" ]]; then
+                warn "Path does not exist (yet): $path"
+                confirm "Add it anyway?" N || exit 1
+            fi
+            GDL_DATA_DIRS+=("${name}=${path}$([[ $ro -eq 1 ]] && echo ':ro' || true)")
+            save_config
+            info "Added data/${name}/ -> ${path}$([[ $ro -eq 1 ]] && echo '  (read-only)' || true)"
+            _restart_hint
+            ;;
+        rm|remove)
+            local name="${1:-}" idx i kept=()
+            [[ -z "$name" ]] && { error "Usage: $0 data rm <name>"; exit 1; }
+            idx="$(_data_index "$name")"
+            [[ "$idx" == "-1" ]] && { error "No data folder named '${name}'."; exit 1; }
+            for i in "${!GDL_DATA_DIRS[@]}"; do
+                [[ "$i" != "$idx" ]] && kept+=("${GDL_DATA_DIRS[$i]}")
+            done
+            GDL_DATA_DIRS=("${kept[@]+"${kept[@]}"}")
+            [[ "${GDL_OPEN:-}" == "data/${name}" ]] && GDL_OPEN=""
+            save_config
+            info "Removed data/${name}/  (the folder itself is untouched)"
+            _restart_hint
+            ;;
+        open)
+            local target="${1:-}"
+            case "$target" in
+                ""|/|root) GDL_OPEN="" ;;
+                workspace) GDL_OPEN="workspace" ;;
+                *)
+                    [[ "$(_data_index "$target")" == "-1" ]] && { error "No data folder named '${target}'."; exit 1; }
+                    GDL_OPEN="data/${target}" ;;
+            esac
+            save_config
+            info "Jupyter opens in: ${GDL_OPEN:-/ (workbench root)}"
+            _restart_hint
+            ;;
+        *)
+            error "Usage: $0 data [ls | add <name> <path> [--ro] | rm <name> | open <name|workspace|root>]"
+            exit 1 ;;
+    esac
+}
+
+# ── Resource limits (container backend) ────────────────────────────────────────
+
+cmd_limits() {
+    load_config
+    if [[ $# -eq 0 ]]; then
+        heading "Resource limits  (container backend)"
+        echo "  Memory limit:        ${GDL_MEMORY:-none}"
+        echo "  Memory reservation:  ${GDL_MEMORY_RESERVE:-none}"
+        echo "  CPUs:                ${GDL_CPUS:-none}"
+        echo ""
+        echo "  Set:   $0 limits --memory 56G --cpus 78 --reserve 4G"
+        echo "  Clear: $0 limits --clear"
+        return 0
+    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --memory)  GDL_MEMORY="${2:-}"; shift 2 ;;
+            --reserve) GDL_MEMORY_RESERVE="${2:-}"; shift 2 ;;
+            --cpus)    GDL_CPUS="${2:-}"; shift 2 ;;
+            --clear)   GDL_MEMORY=""; GDL_MEMORY_RESERVE=""; GDL_CPUS=""; shift ;;
+            *) error "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+    save_config
+    info "Limits: memory=${GDL_MEMORY:-none} reserve=${GDL_MEMORY_RESERVE:-none} cpus=${GDL_CPUS:-none}"
+    [[ "$BACKEND" != "container" ]] && warn "Limits only apply to the container backend."
+    _restart_hint
+}
+
+# ── Profiles / modes / port ────────────────────────────────────────────────────
 
 cmd_profile() {
     load_config
@@ -267,6 +237,7 @@ cmd_profile() {
         warn "Rebuild required to take effect: $0 build"
     else
         heading "Build profiles"
+        local p
         for p in "${PROFILES[@]}"; do
             if [[ "$p" == "${PROFILE:-lab}" ]]; then
                 echo -e "  ${GREEN}* ${BOLD}${p}${NC}${GREEN}  —  ${PROFILE_DESC[$p]}  (${PROFILE_SIZE[$p]})${NC}"
@@ -280,22 +251,6 @@ cmd_profile() {
     fi
 }
 
-# ── Modes ──────────────────────────────────────────────────────────────────────
-
-MODES=("idle" "lab" "server")
-
-declare -A MODE_DESC=(
-    [idle]="Container alive, no Jupyter server — attach via VSCode Dev Containers"
-    [lab]="Start JupyterLab (browser UI + token URL)"
-    [server]="Start Jupyter server only (no Lab UI, lighter than lab)"
-)
-
-validate_mode() {
-    local m="$1"
-    for v in "${MODES[@]}"; do [[ "$m" == "$v" ]] && return 0; done
-    return 1
-}
-
 cmd_mode() {
     load_config
     if [[ -n "${1:-}" ]]; then
@@ -306,13 +261,12 @@ cmd_mode() {
         GDL_MODE="$1"
         save_config
         info "Mode set to: $GDL_MODE"
-        if is_running 2>/dev/null; then
-            warn "Restart the container to apply: $0 restart"
-        fi
+        _restart_hint
     else
         heading "Startup mode"
+        local m
         for m in "${MODES[@]}"; do
-            if [[ "$m" == "${GDL_MODE:-server}" ]]; then
+            if [[ "$m" == "${GDL_MODE:-lab}" ]]; then
                 echo -e "  ${GREEN}* ${BOLD}${m}${NC}${GREEN}  —  ${MODE_DESC[$m]}${NC}"
             else
                 echo "    ${m}  —  ${MODE_DESC[$m]}"
@@ -324,8 +278,6 @@ cmd_mode() {
     fi
 }
 
-# ── Port ───────────────────────────────────────────────────────────────────────
-
 cmd_port() {
     load_config
     if [[ -n "${1:-}" ]]; then
@@ -333,12 +285,13 @@ cmd_port() {
             error "Invalid port: $1  (must be 1024–65535)"
             exit 1
         fi
+        if [[ " $(_other_instance_ports | tr '\n' ' ') " == *" $1 "* ]]; then
+            warn "Port $1 is already configured for another instance (see: $0 instances)."
+        fi
         GDL_PORT="$1"
         save_config
         info "Port set to: $GDL_PORT"
-        if is_running 2>/dev/null; then
-            warn "Restart to apply: $0 restart"
-        fi
+        _restart_hint
     else
         heading "Host port"
         echo "  Port: ${GDL_PORT:-8888}"
@@ -348,209 +301,57 @@ cmd_port() {
     fi
 }
 
-# ── Image / version management ─────────────────────────────────────────────────
+# ── Build / lock / images ──────────────────────────────────────────────────────
 
-cmd_images() {
-    detect_runtime
+cmd_build()  { load_config; be build "$@"; }
+cmd_images() { load_config; be images; }
+cmd_use()    { load_config; be use "${1:-}"; }
+cmd_clean()  { load_config; be clean; }
+cmd_update() { load_config; be update; }
+
+cmd_lock() {
     load_config
-    heading "geodatalab images"
-    local active="${IMAGE_TAG:-latest}"
-    local found=0
-
-    while IFS=' ' read -r tag size created_rest; do
-        [[ -z "$tag" ]] && continue
-        found=1
-        if [[ "$tag" == "$active" ]]; then
-            echo -e "  ${GREEN}${BOLD}* ${tag}${NC}${GREEN}  ${size}  (${created_rest})${NC}"
-        else
-            echo    "    ${tag}  ${size}  (${created_rest})"
-        fi
-    done < <($RUNTIME images --filter "reference=geodatalab" \
-        --format "{{.Tag}} {{.Size}} {{.CreatedSince}}" 2>/dev/null \
-        | sort -t'-' -k1,1Vr || true)
-
-    [[ $found -eq 0 ]] && echo "  None found."
-    echo ""
-    echo -e "  Active: ${BLUE}geodatalab:${active}${NC}"
-    echo    "  Switch: $0 use <tag>"
-}
-
-cmd_use() {
-    load_config
-    local tag="${1:-}"
-    if [[ -z "$tag" ]]; then
-        detect_runtime
-        cmd_images
-        echo ""
-        read -rp "  Tag to activate: " tag
-        [[ -z "$tag" ]] && return 0
+    local target="${1:-${PROFILE:-lab}}" profiles=()
+    if [[ "$target" == "all" ]]; then
+        profiles=("${PROFILES[@]}")
+    elif validate_profile "$target"; then
+        profiles=("$target")
+    else
+        error "Invalid profile: $target  (valid: ${PROFILES[*]} all)"
+        exit 1
     fi
-    IMAGE_TAG="$tag"
-    # Sync PROFILE if the tag encodes a known profile suffix
-    local p
-    for p in "${PROFILES[@]}"; do
-        if [[ "$tag" == *"-${p}" ]]; then
-            PROFILE="$p"
-            break
-        fi
-    done
-    save_config
-    info "Active image: geodatalab:${IMAGE_TAG}"
-    [[ "${PROFILE}" ]] && info "Profile synced to: ${PROFILE}"
+    be lock "${profiles[@]}"
 }
 
-# ── Build ──────────────────────────────────────────────────────────────────────
-
-cmd_build() {
-    detect_runtime
-    load_config
-    local build_profile="${PROFILE:-lab}"
-    local build_tag=""
-    local extra_args=()
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --profile|-p)
-                shift
-                if ! validate_profile "${1:-}"; then
-                    error "Invalid profile: ${1:-}  (valid: ${PROFILES[*]})"
-                    exit 1
-                fi
-                build_profile="$1"; shift
-                ;;
-            --tag|-t)
-                shift
-                build_tag="${1:-}"; shift
-                ;;
-            --no-cache)
-                extra_args+=("--no-cache"); shift
-                ;;
-            *) extra_args+=("$1"); shift ;;
-        esac
-    done
-
-    # Default version: YYYY.MM
-    [[ -z "$build_tag" ]] && build_tag="$(date +%Y.%m)"
-
-    local versioned_tag="${build_tag}-${build_profile}"
-    local versioned_image="geodatalab:${versioned_tag}"
-
-    info "Building  [profile: ${build_profile}, tag: ${versioned_tag}]..."
-    WORKSPACE="${WORKSPACE:-.}" \
-        PROFILE="$build_profile" \
-        GDL_MODE="${GDL_MODE:-server}" \
-        GDL_TAG="$versioned_tag" \
-        GDL_PORT="${GDL_PORT:-8888}" \
-        $COMPOSE -f "$COMPOSE_FILE" build "${extra_args[@]+"${extra_args[@]}"}"
-
-    # Also tag as latest
-    if $RUNTIME tag "$versioned_image" "geodatalab:latest" 2>/dev/null; then
-        info "Tagged as geodatalab:latest"
-    fi
-
-    # Update config to use newly built image
-    IMAGE_TAG="$versioned_tag"
-    PROFILE="$build_profile"
-    save_config
-
-    info "Build complete: ${versioned_image}"
-    $RUNTIME images --filter "reference=geodatalab" \
-        --format "  {{.Tag}}  {{.Size}}" 2>/dev/null | head -8 || true
-}
-
-# ── Container commands ─────────────────────────────────────────────────────────
+# ── Lifecycle ──────────────────────────────────────────────────────────────────
 
 cmd_start() {
-    detect_runtime
     load_config
-    ensure_workspace
-
-    if is_running; then
-        warn "Already running."
-        [[ "${GDL_MODE:-server}" != "idle" ]] && cmd_url
-        return
-    fi
-
-    local image
-    image=$(get_image_name)
-
-    if ! $RUNTIME inspect --type image "$image" &>/dev/null; then
-        # Graceful fallback: if a versioned tag is set but missing, try latest
-        if [[ "${IMAGE_TAG:-latest}" != "latest" ]] && \
-           $RUNTIME inspect --type image "geodatalab:latest" &>/dev/null; then
-            warn "Image ${image} not found — falling back to geodatalab:latest"
-            IMAGE_TAG="latest"
-            image="geodatalab:latest"
-        else
-            error "Image not found: ${image}"
-            echo  "  Build it:  $0 build --profile ${PROFILE:-lab}"
-            exit 1
-        fi
-    fi
-
-    info "Starting  [image: ${image}, mode: ${GDL_MODE:-server}, port: ${GDL_PORT:-8888}]..."
-    compose_run up -d
+    be start
+    gdl_is_running || return 0
     echo ""
-    _wait_healthy
-
-    if [[ "${GDL_MODE:-server}" == "idle" ]]; then
-        echo ""
-        echo "  Container running in idle mode — no Jupyter server."
-        echo "  Attach with VSCode Dev Containers, or open a shell: $0 shell"
+    if [[ "${GDL_MODE:-lab}" == "idle" ]]; then
+        echo "  Running in idle mode — no Jupyter server."
+        echo "  Attach with VS Code Dev Containers, or open a shell: $0 shell"
         echo ""
         echo "  To start JupyterLab: $0 mode lab && $0 restart"
     else
-        echo ""
         cmd_url
     fi
 }
 
-cmd_stop() {
-    detect_runtime
-    load_config
-    info "Stopping container..."
-    compose_run stop
-    info "Stopped."
-}
-
-cmd_restart() {
-    cmd_stop
-    cmd_start
-}
-
-# Run an arbitrary command in the container.
-# With no arguments opens an interactive bash shell (same behaviour as old `shell`).
-cmd_exec() {
-    detect_runtime
-    load_config
-    if ! is_running; then
-        error "Container not running. Start it first: $0 start"
-        exit 1
-    fi
-    if [[ $# -eq 0 ]]; then
-        $RUNTIME exec -it "$CONTAINER_NAME" bash
-    else
-        $RUNTIME exec -it "$CONTAINER_NAME" "$@"
-    fi
-}
-
-# Kept as alias so existing muscle memory works.
-cmd_shell() { cmd_exec; }
-
-cmd_logs() {
-    detect_runtime
-    load_config
-    compose_run logs -f "$SERVICE_NAME"
-}
+cmd_stop()    { load_config; be stop; }
+cmd_restart() { cmd_stop; cmd_start; }
+cmd_exec()    { load_config; be exec "$@"; }
+cmd_shell()   { cmd_exec; }
+cmd_logs()    { load_config; be logs; }
 
 _get_url_raw() {
-    local port="${GDL_PORT:-8888}"
-    local token=""
+    local port="${GDL_PORT:-8888}" token=""
     if [[ -n "${JUPYTER_TOKEN:-}" ]]; then
         token="$JUPYTER_TOKEN"
-    elif is_running; then
-        token=$($RUNTIME logs "$CONTAINER_NAME" 2>&1 \
-            | grep -oP '(?<=token=)[a-f0-9]+' | tail -1 || true)
+    else
+        token="$(be url_token)"
     fi
     if [[ -n "$token" ]]; then
         echo "http://localhost:${port}/lab?token=${token}"
@@ -560,30 +361,26 @@ _get_url_raw() {
 }
 
 cmd_url() {
-    detect_runtime
     load_config
-    if [[ "${GDL_MODE:-server}" == "idle" ]]; then
-        echo "  Container is in idle mode — no Jupyter server running."
+    if [[ "${GDL_MODE:-lab}" == "idle" ]]; then
+        echo "  Idle mode — no Jupyter server running."
         echo "  Switch modes: $0 mode lab && $0 restart"
-        return
+        return 0
     fi
-    local url
-    url=$(_get_url_raw)
-    echo -e "  ${BLUE}${url}${NC}"
-    if [[ -z "${JUPYTER_TOKEN:-}" ]] && ! is_running; then
-        echo "  (token visible in: $0 logs)"
+    echo -e "  ${BLUE}$(_get_url_raw)${NC}"
+    if [[ -z "${JUPYTER_TOKEN:-}" ]] && ! gdl_is_running; then
+        echo "  (not running — start it: $0 start)"
     fi
 }
 
 cmd_open() {
-    detect_runtime
     load_config
-    if [[ "${GDL_MODE:-server}" == "idle" ]]; then
-        error "Container is in idle mode — no Jupyter server running."
+    if [[ "${GDL_MODE:-lab}" == "idle" ]]; then
+        error "Idle mode — no Jupyter server running."
         exit 1
     fi
-    if ! is_running; then
-        error "Container not running. Start it first: $0 start"
+    if ! gdl_is_running; then
+        error "Not running. Start it first: $0 start"
         exit 1
     fi
     local url
@@ -601,54 +398,28 @@ cmd_open() {
 }
 
 cmd_status() {
-    detect_runtime
     load_config
-
-    heading "Container"
-    if is_running; then
-        local health started
-        health=$($RUNTIME inspect -f '{{.State.Health.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "n/a")
-        started=$($RUNTIME inspect -f '{{.State.StartedAt}}' "$CONTAINER_NAME" 2>/dev/null || echo "n/a")
-        echo -e "  State:    ${GREEN}running${NC}"
-        echo    "  Health:   ${health}"
-        echo    "  Started:  ${started}"
-    else
-        echo -e "  State:    ${RED}stopped${NC}"
-    fi
-
-    heading "Images"
-    $RUNTIME images --filter "reference=geodatalab" \
-        --format "  {{.Tag}}  {{.Size}}  (created {{.CreatedSince}})" \
-        2>/dev/null || echo "  None built yet."
+    be status
 
     heading "Configuration"
-    echo "  Workspace:  ${WORKSPACE:-not set}"
+    echo "  Instance:   ${GDL_INSTANCE}$([[ "$GDL_INSTANCE" != default ]] && echo "  ($(instance_file "$GDL_INSTANCE") over .geodatalab)" || true)"
+    echo "  Backend:    ${BACKEND}"
     echo "  Profile:    ${PROFILE:-lab}"
-    echo "  Mode:       ${GDL_MODE:-server}"
+    echo "  Mode:       ${GDL_MODE:-lab}"
     echo "  Port:       ${GDL_PORT:-8888}"
-    echo "  Active tag: ${IMAGE_TAG:-latest}"
-    echo "  Runtime:    ${RUNTIME} (${COMPOSE})"
+    [[ "$BACKEND" == "container" ]] && echo "  Active tag: ${IMAGE_TAG:-latest}"
+    if [[ "$BACKEND" == "container" && -n "${GDL_MEMORY}${GDL_CPUS}" ]]; then
+        echo "  Limits:     memory=${GDL_MEMORY:-none} cpus=${GDL_CPUS:-none}"
+    fi
+    _data_ls
 
-    if is_running && [[ "${GDL_MODE:-server}" != "idle" ]]; then
+    if gdl_is_running && [[ "${GDL_MODE:-lab}" != "idle" ]]; then
         heading "URL"
         cmd_url
     fi
 }
 
 # ── Packages ───────────────────────────────────────────────────────────────────
-
-_expand_requirements() {
-    local file="$1"
-    [[ -f "$file" ]] || return
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ -z "$line" || "$line" == \#* ]] && continue
-        if [[ "$line" == -r\ * ]]; then
-            _expand_requirements "${SCRIPT_DIR}/requirements/${line#-r }"
-        else
-            echo "    • $line"
-        fi
-    done < "$file"
-}
 
 cmd_packages() {
     load_config
@@ -659,16 +430,24 @@ cmd_packages() {
         local req="${SCRIPT_DIR}/requirements/${p}.txt"
         heading "  ${p}  —  ${PROFILE_DESC[$p]}"
         echo -e "  ${BOLD}System:${NC}  ${PROFILE_SYS[$p]}"
-        echo -e "  ${BOLD}Python:${NC}"
+        if [[ "$BACKEND" == "pixi" && ( "$p" == "lab" || "$p" == "institute" ) ]]; then
+            echo -e "           ${YELLOW}(pixi backend: SAGA GIS not available)${NC}"
+        fi
+        if [[ -f "${SCRIPT_DIR}/requirements/locks/${p}.lock" ]]; then
+            echo -e "  ${BOLD}Python:${NC}  (locked versions from requirements/locks/${p}.lock)"
+        else
+            echo -e "  ${BOLD}Python:${NC}  (not locked — run: $0 lock ${p})"
+        fi
         if [[ -f "$req" ]]; then
-            _expand_requirements "$req"
+            _expand_requirements "$req" "$p"
         else
             echo "    (requirements file not found)"
         fi
     }
 
+    show_logo
     if [[ "$target" == "all" ]]; then
-        show_logo
+        local p
         for p in "${PROFILES[@]}"; do
             _show_profile "$p"
             echo ""
@@ -678,66 +457,45 @@ cmd_packages() {
             error "Invalid profile: $target  (valid: ${PROFILES[*]})"
             exit 1
         fi
-        show_logo
         _show_profile "$target"
         echo ""
     fi
 }
 
-# ── Clean / Update ─────────────────────────────────────────────────────────────
-
-cmd_clean() {
-    detect_runtime
-    load_config
-    echo -e "${YELLOW}This will remove the container and all geodatalab images.${NC}"
-    read -rp "Are you sure? [y/N] " confirm
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        compose_run down --rmi local --volumes 2>/dev/null || true
-        info "Cleaned."
-    else
-        info "Cancelled."
-    fi
-}
-
-cmd_update() {
-    detect_runtime
-    load_config
-    local build_tag
-    build_tag="$(date +%Y.%m)"
-    local versioned_tag="${build_tag}-${PROFILE:-lab}"
-    info "Rebuilding image (no cache)  [tag: ${versioned_tag}]..."
-    WORKSPACE="${WORKSPACE:-.}" \
-        PROFILE="${PROFILE:-lab}" \
-        GDL_MODE="${GDL_MODE:-server}" \
-        GDL_TAG="$versioned_tag" \
-        GDL_PORT="${GDL_PORT:-8888}" \
-        $COMPOSE -f "$COMPOSE_FILE" build --no-cache
-    $RUNTIME tag "geodatalab:${versioned_tag}" "geodatalab:latest" 2>/dev/null || true
-    IMAGE_TAG="$versioned_tag"
-    save_config
-    if is_running; then
-        info "Restarting with new image..."
-        compose_run up -d
-    fi
-    info "Update complete."
-    $RUNTIME images --filter "reference=geodatalab" \
-        --format "  {{.Tag}}  {{.Size}}" 2>/dev/null | head -8 || true
-}
-
 # ── Init wizard ────────────────────────────────────────────────────────────────
 
 cmd_init() {
-    detect_runtime
     load_config
 
     clear; show_logo
     echo -e "  ${BOLD}Welcome to geodatalab — first-time setup${NC}"
     echo    "  This wizard will configure your environment."
     echo ""
+    read -rp "  Press Enter to continue..." _
+
+    # Backend
+    local b_opts=() b
+    for b in "${BACKENDS[@]}"; do b_opts+=("$(printf '%-10s —  %s' "$b" "${BACKEND_DESC[$b]}")"); done
+    if _pick_from_list "Select a backend" "${b_opts[@]}"; then
+        BACKEND="${BACKENDS[$PICKED_IDX]}"
+        save_config
+    fi
+    clear; show_logo
 
     # Workspace
     prompt_workspace
     echo ""
+
+    # Data folder
+    if confirm "Add a data folder (e.g. a shared data disk) now?" N; then
+        local dname dpath
+        read -rp "  Name (e.g. ccdrn): " dname
+        read -rp "  Path: " dpath
+        if [[ -n "$dname" && -n "$dpath" ]]; then
+            ( cmd_data add "$dname" "$dpath" ) || true
+            load_config
+        fi
+    fi
 
     # Profile
     if _pick_profile "Select a build profile"; then
@@ -747,20 +505,19 @@ cmd_init() {
 
     # Mode
     local mode_opts=(
-        "server  —  ${MODE_DESC[server]}"
-        "lab     —  ${MODE_DESC[lab]}"
-        "idle    —  ${MODE_DESC[idle]}"
+        "lab   —  ${MODE_DESC[lab]}"
+        "idle  —  ${MODE_DESC[idle]}"
     )
     echo ""
     if _pick_from_list "Select startup mode" "${mode_opts[@]}"; then
         case $PICKED_IDX in
-            0) GDL_MODE=server ;; 1) GDL_MODE=lab ;; 2) GDL_MODE=idle ;;
+            0) GDL_MODE=lab ;; 1) GDL_MODE=idle ;;
         esac
         save_config
     fi
 
     # Port
-    echo ""
+    clear; show_logo
     read -rp "  Host port [${GDL_PORT:-8888}]: " p
     if [[ -n "${p:-}" ]]; then
         cmd_port "$p"
@@ -769,13 +526,11 @@ cmd_init() {
     echo ""
     info "Configuration saved."
     echo ""
-    read -rp "  Build the image now? [Y/n] " yn
-    if [[ ! "${yn:-}" =~ ^[Nn]$ ]]; then
+    if confirm "Build the ${BACKEND} workbench now?" Y; then
         echo ""
         cmd_build
         echo ""
-        read -rp "  Start the container now? [Y/n] " yn2
-        if [[ ! "${yn2:-}" =~ ^[Nn]$ ]]; then
+        if confirm "Start it now?" Y; then
             echo ""
             cmd_start
         fi
@@ -788,42 +543,67 @@ cmd_help() {
     show_logo
     cat <<EOF
 ${BOLD}Usage:${NC}
-  ./geodatalab.sh <command> [options]
+  ./geodatalab.sh [-i <instance>] <command> [options]
 
-${BOLD}Container:${NC}
-  start                          Start the container
-  stop                           Stop the container
-  restart                        Restart the container
+${BOLD}Workbench:${NC}
+  start                          Start the workbench (Jupyter)
+  stop                           Stop it
+  restart                        Restart it
   open                           Open JupyterLab in the browser
-  shell                          Open an interactive bash shell
-  exec [cmd...]                  Run a command inside the container
-  logs                           Follow container logs
-  status                         Show container, image and config info
+  shell                          Interactive bash inside the workbench
+  exec [cmd...]                  Run a command inside the workbench
+  logs                           Follow logs
+  status                         State, config, data folders, URL
   url                            Print the JupyterLab URL with token
 
-${BOLD}Build / images:${NC}
+${BOLD}Build:${NC}
   build [-p <profile>] [-t <tag>] [--no-cache]
-                                 Build the image
-  images                         List all built geodatalab images
-  use [tag]                      Switch the active image tag
-  update                         Rebuild without cache and restart
-  clean                          Remove container and image(s)
+                                 Build the image / environment (from locks)
+  lock [profile|all]             Re-resolve latest versions and write lock files
+  update                         Re-lock and rebuild, restart if running
+  images                         List built images            (container)
+  use [tag]                      Switch the active image tag  (container)
+  clean                          Remove container+images / environment
 
 ${BOLD}Configuration:${NC}
   init                           First-time guided setup wizard
+  backend [name]                 Show or set the backend  (container|pixi|nix)
   workspace [path]               Show or set the workspace directory
+  data                           List data folders
+  data add <name> <path> [--ro]  Add a data folder  -> data/<name>/ in the workbench
+  data rm <name>                 Remove a data folder (files untouched)
+  data open <name|workspace>     Folder Jupyter opens in
+  limits [--memory X] [--cpus N] [--reserve X] [--clear]
+                                 Resource limits              (container)
   profile [name]                 Show or set the build profile
   mode [name]                    Show or set the startup mode
   port [number]                  Show or set the host port  (default: 8888)
   packages [profile|all]         List packages included in a profile
 
+${BOLD}Instances${NC} (several workbenches side by side, e.g. one per project):
+  instances                      List instances: backend, profile, port, state, data
+  instances new <name> [--from <instance>]
+                                 Create one (gets its own free port)
+  instances rm <name>            Remove one (its container / state; data untouched)
+  -i <name> <command>            Run any command for that instance (or GDL_INSTANCE=<name>)
+  An instance inherits .geodatalab and stores only what differs:
+    ./geodatalab.sh instances new pinhel
+    ./geodatalab.sh -i pinhel profile kitchen
+    ./geodatalab.sh -i pinhel data add ren /data/REN/Pinhel --ro
+    ./geodatalab.sh -i pinhel start
+
 ${BOLD}Interactive TUI:${NC}
   menu                           Arrow-key menu (default when called with no args)
 
-${BOLD}Startup modes:${NC}
-  idle    ${MODE_DESC[idle]}
-  lab     ${MODE_DESC[lab]}
-  server  ${MODE_DESC[server]}
+${BOLD}Backends:${NC}
+  container  ${BACKEND_DESC[container]}  [default]
+  pixi       ${BACKEND_DESC[pixi]}
+  nix        ${BACKEND_DESC[nix]}
+
+${BOLD}Workbench layout${NC} (identical on every backend):
+  \$GDL_ROOT/workspace/      your workspace (read-write)
+  \$GDL_ROOT/data/<name>/    each data folder
+  Notebooks: Path(os.environ["GDL_DATA"]) / "<name>"
 
 ${BOLD}Profiles:${NC}
   kitchen    ${PROFILE_DESC[kitchen]}
@@ -831,29 +611,99 @@ ${BOLD}Profiles:${NC}
   institute  ${PROFILE_DESC[institute]}
   r+julia    ${PROFILE_DESC[r+julia]}
 
-${BOLD}Versioned images:${NC}
-  Each build is tagged  geodatalab:YYYY.MM-<profile>  and aliased as  geodatalab:latest
-  Custom tag:  ./geodatalab.sh build --tag 3.1 --profile lab
-  List:        ./geodatalab.sh images
-  Switch:      ./geodatalab.sh use 2025.05-lab
-
 ${BOLD}Environment variables:${NC}
   JUPYTER_TOKEN   Auth token (empty = no auth, unset = auto-generated)
-  GDL_PORT        Host port override  (default: 8888, persisted in .geodatalab)
-  GDL_MODE        Mode override  (idle|lab|server)
+  GDL_BACKEND     One-off backend override (container|pixi)
+  GDL_BIND        pixi: listen address (default 127.0.0.1; 0.0.0.0 for LAN)
+  GDL_HOME        pixi binary location (default ~/.local/share/geodatalab)
+  GDL_ASSUME_YES  1 = answer yes to prompts (scripts / CI)
 
 ${BOLD}Examples:${NC}
   ./geodatalab.sh init
-  ./geodatalab.sh workspace /data/projects
-  ./geodatalab.sh build --profile institute
-  ./geodatalab.sh build --tag 3.1 --profile lab
-  ./geodatalab.sh start && ./geodatalab.sh open
-  ./geodatalab.sh images
-  ./geodatalab.sh use 2025.05-lab
-  ./geodatalab.sh exec python3 -c "import geopandas; print('ok')"
-  ./geodatalab.sh mode lab && ./geodatalab.sh restart
-  JUPYTER_TOKEN=secret ./geodatalab.sh start
+  ./geodatalab.sh workspace ~/projects
+  ./geodatalab.sh data add ccdrn /media/disk1/CCDRN --ro && ./geodatalab.sh data open ccdrn
+  ./geodatalab.sh lock lab && ./geodatalab.sh build --profile lab
+  ./geodatalab.sh backend pixi && ./geodatalab.sh build -p kitchen && ./geodatalab.sh start
+  ./geodatalab.sh exec python -c "import geopandas; print('ok')"
+  ssh box ./geodatalab/geodatalab.sh start   # remote; then: ssh -L 8888:localhost:8888 box
 EOF
+}
+
+# ── Instances ──────────────────────────────────────────────────────────────────
+
+_instances_ls() {
+    local n cur="$GDL_INSTANCE"
+    heading "Instances"
+    printf "  ${BOLD}%-2s%-16s %-10s %-10s %-6s %-9s %s${NC}\n" "" NAME BACKEND PROFILE PORT STATE DATA
+    while IFS= read -r n; do
+        (
+            GDL_INSTANCE="$n"
+            load_config 2>/dev/null || exit 0
+            local state="stopped" names="" e mark=" "
+            gdl_is_running && state="running"
+            for e in "${GDL_DATA_DIRS[@]+"${GDL_DATA_DIRS[@]}"}"; do
+                _data_parse "$e"; names+="${_D_NAME}$([[ $_D_RO -eq 1 ]] && echo '(ro)' || true) "
+            done
+            [[ "$n" == "$cur" ]] && mark="*"
+            if [[ "$state" == running ]]; then state="${GREEN}running${NC}  "; else state="stopped  "; fi
+            printf "  %-2s%-16s %-10s %-10s %-6s %b %s\n" "$mark" "$n" "$BACKEND" "$PROFILE" "$GDL_PORT" "$state" "${names:--}"
+        )
+    done < <(list_instances)
+    echo ""
+    echo "  New:  $0 instances new <name> [--from <instance>]      Use:  $0 -i <name> <command>"
+}
+
+cmd_instances() {
+    local sub="${1:-ls}"
+    [[ $# -gt 0 ]] && shift
+    case "$sub" in
+        ls|list) _instances_ls ;;
+        new|add)
+            local name="${1:-}" from="" port f
+            [[ "${2:-}" == "--from" ]] && from="${3:-}"
+            if ! validate_instance_name "$name"; then
+                error "Usage: $0 instances new <name> [--from <instance>]   (name: lowercase letters, digits, -; not 'default')"
+                exit 1
+            fi
+            f="$(instance_file "$name")"
+            [[ -f "$f" ]] && { error "Instance '${name}' already exists."; exit 1; }
+            if [[ -n "$from" && "$from" != "default" && ! -f "$(instance_file "$from")" ]]; then
+                error "No instance '${from}' to copy from."; exit 1
+            fi
+            GDL_INSTANCE="$name"
+            port="$(gdl_free_port)"
+            mkdir -p "$INSTANCE_DIR"
+            {
+                echo "# geodatalab instance '${name}' — only what differs from .geodatalab"
+                if [[ -n "$from" && "$from" != "default" ]]; then
+                    grep -vE '^(#|GDL_PORT=)' "$(instance_file "$from")" || true
+                fi
+                echo "GDL_PORT=${port}"
+            } > "$f"
+            info "Created instance '${name}' on port ${port}${from:+ (copied from ${from})}"
+            echo "  Configure:  $0 -i ${name} profile|data|open|mode|backend ..."
+            echo "  Start:      $0 -i ${name} start"
+            ;;
+        rm|remove)
+            local name="${1:-}"
+            validate_instance_name "$name" || { error "Usage: $0 instances rm <name>"; exit 1; }
+            [[ -f "$(instance_file "$name")" ]] || { error "No instance '${name}'."; exit 1; }
+            if ( GDL_INSTANCE="$name"; load_config; gdl_is_running ); then
+                error "Instance '${name}' is running. Stop it first: $0 -i ${name} stop"
+                exit 1
+            fi
+            confirm "Remove instance '${name}' (config + generated state; data folders untouched)?" N || exit 0
+            ( GDL_INSTANCE="$name"; load_config
+              if [[ "$BACKEND" == "container" ]]; then be init 2>/dev/null; compose_run down 2>/dev/null || true; fi ) || true
+            if [[ -d "${GDL_STATE_ROOT}/${name}" ]]; then
+                find "${GDL_STATE_ROOT}/${name}" -type l -delete     # symlink farm: links only
+                rm -rf -- "${GDL_STATE_ROOT:?}/${name:?}"
+            fi
+            rm -f -- "$(instance_file "$name")"
+            info "Removed instance '${name}'."
+            ;;
+        *) error "Usage: $0 instances [ls | new <name> [--from <instance>] | rm <name>]"; exit 1 ;;
+    esac
 }
 
 # ── Interactive menu ───────────────────────────────────────────────────────────
@@ -947,8 +797,12 @@ _pick_profile() {
 }
 
 _menu_build() {
-    _pick_profile "Build image — select profile  (current: ${PROFILE:-lab})" || return 0
+    _pick_profile "Build ${BACKEND} — select profile  (current: ${PROFILE:-lab})" || return 0
     clear; show_logo
+    if [[ "$BACKEND" != "container" ]]; then
+        cmd_build --profile "$_PICKED_PROFILE"
+        return
+    fi
     read -rp "  Version tag [$(date +%Y.%m)]: " vtag
     vtag="${vtag:-$(date +%Y.%m)}"
     cmd_build --tag "$vtag" --profile "$_PICKED_PROFILE"
@@ -962,17 +816,16 @@ _menu_select_profile() {
 
 _menu_select_mode() {
     local opts=(
-        "idle    —  ${MODE_DESC[idle]}"
-        "lab     —  ${MODE_DESC[lab]}"
-        "server  —  ${MODE_DESC[server]}"
+        "lab   —  ${MODE_DESC[lab]}"
+        "idle  —  ${MODE_DESC[idle]}"
     )
-    _pick_from_list "Set startup mode  (current: ${GDL_MODE:-server})" \
+    _pick_from_list "Set startup mode  (current: ${GDL_MODE:-lab})" \
         "${opts[@]}" || return 0
     clear; show_logo
     case $PICKED_IDX in
-        0) cmd_mode idle ;; 1) cmd_mode lab ;; 2) cmd_mode server ;;
+        0) cmd_mode lab ;; 1) cmd_mode idle ;;
     esac
-    if is_running 2>/dev/null; then
+    if gdl_is_running; then
         echo ""
         read -rp "  Restart now to apply? [Y/n] " yn
         [[ ! "$yn" =~ ^[Nn]$ ]] && cmd_restart || true
@@ -1042,17 +895,15 @@ _menu_images() {
 }
 
 cmd_menu() {
-    detect_runtime
     load_config
 
     # ── Cached state (updated at start and after each action) ─────────────────
     local _cache_running=false _cache_health=""
 
     _refresh_status() {
-        if is_running 2>/dev/null; then
+        if gdl_is_running; then
             _cache_running=true
-            _cache_health=$($RUNTIME inspect -f '{{.State.Health.Status}}' \
-                "$CONTAINER_NAME" 2>/dev/null || echo "")
+            _cache_health=$(be health 2>/dev/null || echo "")
         else
             _cache_running=false
             _cache_health=""
@@ -1071,11 +922,11 @@ cmd_menu() {
             unhealthy) _hstr="  ${RED}unhealthy${NC}" ;;
             starting)  _hstr="  ${YELLOW}starting${NC}" ;;
         esac
-        echo -e "  ${BOLD}── Container status${NC}"
+        echo -e "  ${BOLD}── Workbench  ·  ${BACKEND}$([[ "$GDL_INSTANCE" != default ]] && echo "  ·  instance ${GDL_INSTANCE}" || true)${NC}"
         if [[ "$_cache_running" == true ]]; then
-            echo -e "  ${GREEN}●${NC} running${_hstr:+  ·${_hstr}}  ·  $(get_image_name)  ·  :${GDL_PORT:-8888}"
+            echo -e "  ${GREEN}●${NC} running${_hstr:+  ·${_hstr}}  ·  $(_label)  ·  :${GDL_PORT:-8888}"
         else
-            echo -e "  ${RED}○${NC} stopped  ·  $(get_image_name)"
+            echo -e "  ${RED}○${NC} stopped  ·  $(_label)"
         fi
         echo ""
     }
@@ -1093,10 +944,10 @@ cmd_menu() {
         local _pause=0
         case "$action" in
             shell)
-                if is_running; then
+                if gdl_is_running; then
                     cmd_shell || true
                 else
-                    echo ""; error "Container is not running."
+                    echo ""; error "Workbench is not running."
                     echo "  Select  Start  from the menu first."; _pause=1
                 fi ;;
             logs)      cmd_logs || true ;;
@@ -1107,10 +958,14 @@ cmd_menu() {
             status)    ( cmd_status  ) || true; _pause=1 ;;
             url)       ( cmd_url     ) || true; _pause=1 ;;
             build)     ( _menu_build ) || true; _pause=1 ;;
+            lock)      ( cmd_lock    ) || true; _pause=1 ;;
             images)    _menu_images ;;
             update)    ( cmd_update  ) || true; _pause=1 ;;
             clean)     ( cmd_clean   ) || true ;;
             workspace) _menu_workspace ;;
+            instances) ( _instances_ls ) || true; _pause=1 ;;
+            backend)   _menu_backend || true ;;
+            data)      _menu_data || true ;;
             profile)   _menu_select_profile || true ;;
             mode)      _menu_select_mode || true ;;
             port)      _menu_port ;;
@@ -1167,7 +1022,7 @@ cmd_menu() {
     }
 
     # ── Top-level menu ─────────────────────────────────────────────────────────
-    local -a _top_labels=("  Container" "  Build" "  Configuration" "  Help" "  Exit")
+    local -a _top_labels=("  Workbench" "  Build" "  Configuration" "  Help" "  Exit")
     local -a _top_cats=("container"    "build"   "configuration"    "help"  "exit")
     local _n=${#_top_labels[@]}
     local _sel=0 _key _esc
@@ -1200,26 +1055,30 @@ cmd_menu() {
             ''|$'\n')
                 case "${_top_cats[$_sel]}" in
                     container)
-                        _submenu "Container" \
+                        _submenu "Workbench" \
                             "  Start"            start \
                             "  Stop"             stop \
                             "  Restart"          restart \
                             "  Open in browser"  open \
-                            "  Container shell"  shell \
+                            "  Shell"            shell \
                             "  Logs"             logs \
                             "  Status"           status \
                             "  URL"              url
                         ;;
                     build)
                         _submenu "Build" \
-                            "  Build image"                      build \
+                            "  Build"                            build \
+                            "  Lock    (pin latest package versions)" lock \
                             "  Images · versions"                images \
-                            "  Update  (rebuild, no cache)"      update \
-                            "  Clean   (remove container + images)" clean
+                            "  Update  (re-lock + rebuild)"      update \
+                            "  Clean   (remove image(s) / environment)" clean
                         ;;
                     configuration)
                         _submenu "Configuration" \
-                            "  Workspace"  workspace \
+                            "  Instances"     instances \
+                            "  Backend"       backend \
+                            "  Workspace"     workspace \
+                            "  Data folders"  data \
                             "  Profile"    profile \
                             "  Mode"       mode \
                             "  Port"       port
@@ -1248,10 +1107,63 @@ cmd_menu() {
     clear
 }
 
+_menu_backend() {
+    local opts=() b
+    for b in "${BACKENDS[@]}"; do opts+=("$(printf '%-10s —  %s' "$b" "${BACKEND_DESC[$b]}")"); done
+    _pick_from_list "Set backend  (current: ${BACKEND})" "${opts[@]}" || return 0
+    clear; show_logo
+    ( cmd_backend "${BACKENDS[$PICKED_IDX]}" ) || true
+    load_config
+    sleep 1
+}
+
+_menu_data() {
+    local key name path ro
+    while true; do
+        clear; show_logo
+        load_config
+        _data_ls
+        echo ""
+        echo "  a add  ·  r remove  ·  o open-in  ·  any other key: back"
+        IFS= read -r -s -n1 key
+        case "$key" in
+            a|A)
+                echo ""
+                read -rp "  Name (e.g. ccdrn): " name
+                read -rp "  Host path: " path
+                read -rp "  Read-only? [y/N] " ro
+                [[ -z "$name" || -z "$path" ]] && continue
+                if [[ "$ro" =~ ^[Yy]$ ]]; then ( cmd_data add "$name" "$path" --ro ) || true
+                else ( cmd_data add "$name" "$path" ) || true; fi
+                sleep 1 ;;
+            r|R)
+                echo ""
+                read -rp "  Name to remove: " name
+                [[ -n "$name" ]] && { ( cmd_data rm "$name" ) || true; sleep 1; } ;;
+            o|O)
+                echo ""
+                read -rp "  Open Jupyter in (name | workspace | root): " name
+                ( cmd_data open "$name" ) || true
+                sleep 1 ;;
+            *) return 0 ;;
+        esac
+    done
+}
+
 # ── Main ───────────────────────────────────────────────────────────────────────
+
+# Global option: -i/--instance NAME (or GDL_INSTANCE=NAME) selects a workbench instance
+while [[ "${1:-}" == "-i" || "${1:-}" == "--instance" || "${1:-}" == --instance=* ]]; do
+    if [[ "$1" == --instance=* ]]; then GDL_INSTANCE="${1#--instance=}"; shift
+    else GDL_INSTANCE="${2:-}"; shift 2 || true; fi
+    if [[ "$GDL_INSTANCE" != "default" ]] && ! validate_instance_name "$GDL_INSTANCE"; then
+        error "Invalid instance name: '${GDL_INSTANCE}'"; exit 1
+    fi
+done
 
 case "${1:-menu}" in
     build)     shift; cmd_build "$@" ;;
+    lock)      shift; cmd_lock "${1:-}" ;;
     start)     cmd_start ;;
     stop)      cmd_stop ;;
     restart)   cmd_restart ;;
@@ -1266,7 +1178,12 @@ case "${1:-menu}" in
     images)    cmd_images ;;
     use)       shift; cmd_use "${1:-}" ;;
     init)      cmd_init ;;
+    backend)   shift; cmd_backend "${1:-}" ;;
+    instances|instance) shift; cmd_instances "$@" ;;
+    render)    load_config; container_render ;;   # regenerate .gdl/compose.data.yml (Dev Containers; any backend)
     workspace) shift; cmd_workspace "${1:-}" ;;
+    data)      shift; cmd_data "$@" ;;
+    limits)    shift; cmd_limits "$@" ;;
     profile)   shift; cmd_profile "${1:-}" ;;
     mode)      shift; cmd_mode "${1:-}" ;;
     port)      shift; cmd_port "${1:-}" ;;

@@ -17,5 +17,14 @@ dask
 scipy
 SQLAlchemy
 duckdb
+# analysis / ML
+scikit-learn
+scikit-image
+xarray-spatial
+# spatial statistics (PySAL family)
+libpysal
+esda
+mgwr
+momepy
 whitebox
 whitebox-workflows

@@ -1,3 +1,9 @@
+# Base service definition — machine-independent, safe to commit.
+#
+# Per-machine / per-instance settings (data folders, limits, start folder, name)
+# live in .geodatalab and are rendered by ./geodatalab.sh into the generated,
+# gitignored .gdl/compose.data.yml, passed as a second -f file.
+# Manage them with:  ./geodatalab.sh data add|rm|ls|open  and  limits
 services:
   gis:
     build:
@@ -6,28 +12,23 @@ services:
       args:
         PROFILE: ${PROFILE:-lab}
     image: geodatalab:${GDL_TAG:-latest}
-    container_name: geodatalab
+    # container_name comes from the generated fragment (geodatalab / geodatalab-<instance>)
     ports:
       - "${GDL_PORT:-8888}:8888"
     volumes:
-      - ${WORKSPACE:-.}:/workspace:Z
+      - ${WORKSPACE:-.}:/gdl/workspace:Z
     environment:
       - JUPYTER_TOKEN=${JUPYTER_TOKEN:-}
-      - GDL_MODE=${GDL_MODE:-server}
+      - GDL_MODE=${GDL_MODE:-lab}
+      - GDL_ROOT=/gdl
+      - GDL_WORKSPACE=/gdl/workspace
+      - GDL_DATA=/gdl/data
     security_opt:
       - label=disable
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "[ \"${GDL_MODE:-server}\" = idle ] || python3 -c \"import socket; socket.create_connection(('localhost', 8888), 2).close()\""]
+      test: ["CMD-SHELL", "[ \"${GDL_MODE:-lab}\" = idle ] || python3 -c \"import socket; socket.create_connection(('localhost', 8888), 2).close()\""]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
-    # Uncomment to limit resources:
-    # deploy:
-    #   resources:
-    #     limits:
-    #       memory: 8G
-    #       cpus: "4.0"
-    #     reservations:
-    #       memory: 2G

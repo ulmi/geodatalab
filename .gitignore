@@ -1,5 +1,14 @@
-# Local user config — never commit
+# Local settings — never commit
 .geodatalab
+.geodatalab.d/
+geodatalab.toml
+*.bak
 
-# Claude Code internals
-.claude/
+# Generated state / environments
+.gdl/
+.pixi/
+__pycache__/
+*.pyc
+
+# Claude Code local overrides
+.claude/settings.local.json

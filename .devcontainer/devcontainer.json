@@ -1,33 +1,22 @@
 {
   "name": "geodatalab",
 
-  // Build the image first with: ./geodatalab.sh build
-  "image": "geodatalab:latest",
-
-  // The folder open in VS Code is mounted at /workspace inside the container.
-  "workspaceFolder": "/workspace",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
-
-  // idle mode: container stays alive without JupyterLab.
-  // VS Code talks directly to ipykernel — no Jupyter server needed for notebooks.
-  "containerEnv": {
-    "GDL_MODE": "idle"
-  },
-  "overrideCommand": false,
-
-  // Image runs as root.
+  // Same compose files as ./geodatalab.sh start, plus an idle overlay.
+  // The generated fragment holds image, name, workspace and data mounts.
+  "initializeCommand": "./geodatalab.sh render",
+  "dockerComposeFile": [
+    "../compose.yml",
+    "../.gdl/default/compose.data.yml",
+    "compose.idle.yml"
+  ],
+  "service": "gis",
+  "workspaceFolder": "/gdl/workspace",
+  "shutdownAction": "none",
   "remoteUser": "root",
 
-  // SELinux: disable label enforcement (Fedora, RHEL, etc.)
-  "runArgs": ["--security-opt=label=disable"],
-
-  // Forward port in case JupyterLab is started from the integrated terminal.
   "forwardPorts": [8888],
   "portsAttributes": {
-    "8888": {
-      "label": "JupyterLab",
-      "onAutoForward": "notify"
-    }
+    "8888": { "label": "JupyterLab", "onAutoForward": "notify" }
   },
 
   "customizations": {
@@ -48,5 +37,5 @@
     }
   },
 
-  "postCreateCommand": "echo '── geodatalab ready ──' && python --version && echo 'GDAL '$(gdal-config --version 2>/dev/null || echo 'not found')"
+  "postCreateCommand": "echo '── geodatalab ready ──' && python --version && gdalinfo --version"
 }

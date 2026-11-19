@@ -1,0 +1,5 @@
+# build — always installed on top of the profile (all profiles).
+# pdal (Python bindings) compiles against /opt/pdal in the image;
+# pybind11 is needed to build pylasr (lasR) from source.
+pdal
+pybind11

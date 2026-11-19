@@ -1,4 +1,6 @@
+# Whitelist build context
 *
 !Dockerfile
 !entrypoint.sh
 !requirements/
+!tests/smoke.py
