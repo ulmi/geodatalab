@@ -1,9 +1,9 @@
 {
   "name": "geodatalab",
 
-  // Same compose files as ./geodatalab.sh start, plus an idle overlay.
+  // Same compose files as `pixi run start`, plus an idle overlay.
   // The generated fragment holds image, name, workspace and data mounts.
-  "initializeCommand": "./geodatalab.sh render",
+  "initializeCommand": "pixi run render",
   "dockerComposeFile": [
     "../compose.yml",
     "../.gdl/default/compose.data.yml",

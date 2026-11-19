@@ -6,7 +6,7 @@
 #
 # Layout (identical on every geodatalab backend):
 #   $GDL_ROOT/workspace     workspace (read-write)
-#   $GDL_ROOT/data/<name>   data folders declared with: ./geodatalab.sh data add
+#   $GDL_ROOT/data/<name>   data folders declared in geodatalab.toml (pixi run gdl)
 # GDL_OPEN (optional) is the folder, relative to GDL_ROOT, Jupyter opens in.
 
 ROOT="${GDL_ROOT:-/gdl}"

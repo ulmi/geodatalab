@@ -1,9 +1,9 @@
 # Base service definition — machine-independent, safe to commit.
 #
-# Per-machine / per-instance settings (data folders, limits, start folder, name)
-# live in .geodatalab and are rendered by ./geodatalab.sh into the generated,
-# gitignored .gdl/compose.data.yml, passed as a second -f file.
-# Manage them with:  ./geodatalab.sh data add|rm|ls|open  and  limits
+# Per-machine / per-instance settings (workspace, data folders, limits, start
+# folder, name) live in geodatalab.toml and are rendered by the manager into the
+# generated, gitignored .gdl/<instance>/compose.data.yml, passed as a second -f.
+# Manage them with:  pixi run gdl
 services:
   gis:
     build:
@@ -15,8 +15,6 @@ services:
     # container_name comes from the generated fragment (geodatalab / geodatalab-<instance>)
     ports:
       - "${GDL_PORT:-8888}:8888"
-    volumes:
-      - ${WORKSPACE:-.}:/gdl/workspace:Z
     environment:
       - JUPYTER_TOKEN=${JUPYTER_TOKEN:-}
       - GDL_MODE=${GDL_MODE:-lab}

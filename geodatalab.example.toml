@@ -1,0 +1,25 @@
+# geodatalab settings — copy to geodatalab.toml, or let `pixi run gdl` create it.
+# The default instance lives at the top level; named instances under
+# [instance.<name>] store only what differs (plus their own port).
+
+backend = "pixi"                  # "pixi" (host env) or "container" (Podman/Docker)
+profile = "lab"                   # kitchen | lab | institute | r+julia
+mode = "lab"                      # lab (JupyterLab) | idle (no Jupyter)
+port = 8888
+workspace = "/home/me/projects"   # appears as workspace/ (read-write)
+open = "data/ccdrn"               # folder Jupyter opens in (optional)
+image_tag = ""                    # container: image geodatalab:<tag>, empty = latest
+
+[limits]                          # container backend only
+memory = "16G"
+memory_reserve = "4G"
+cpus = "6"
+
+[[data]]                          # appears as data/<name>/
+name = "ccdrn"
+path = "/media/disk1/CCDRN"
+ro = true                         # enforced on the container backend only
+
+[instance.pinhel]
+port = 8890
+profile = "kitchen"

@@ -2,7 +2,7 @@
 """geodatalab smoke test — run inside the workbench (any backend).
 
     python tests/smoke.py [profile]          # pixi / host
-    ./geodatalab.sh exec python /opt/geodatalab/smoke.py   # container
+    python /opt/geodatalab/smoke.py          # container (pixi run shell)
 
 Profile defaults to $GDL_PROFILE. Imports every package the profile promises
 and runs one tiny operation for the important ones. Exit code 1 on failure.
