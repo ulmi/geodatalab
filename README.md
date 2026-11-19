@@ -133,6 +133,7 @@ The `requirements/*.txt` files list what goes in. The lock files pin exact versi
 | `JUPYTER_TOKEN` | Fixed auth token (unset = auto-generated) |
 | `GDL_INSTANCE` | Same as `-i <name>` |
 | `GDL_BACKEND` | One-off backend override |
+| `GDL_RUNTIME` | `podman` or `docker` (default: podman if installed, else docker) |
 | `GDL_BIND` | pixi: listen address (default `127.0.0.1`) |
 | `GDL_CONFIG` | Use another settings file |
 

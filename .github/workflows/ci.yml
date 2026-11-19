@@ -1,0 +1,78 @@
+name: ci
+
+on:
+  push:
+    branches: [main, merge-geodatalab2]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  manager:
+    name: manager + pixi kitchen (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]   # linux-64, osx-arm64, win-64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.84.2
+          environments: default kitchen
+          locked: true
+          cache: true
+
+      - name: pixi.toml is up to date with requirements/
+        run: pixi run python envs/pixi/gen_pixi.py --check
+
+      - name: Unit tests (incl. headless TUI)
+        run: pixi run test
+
+      - name: Settings for the pixi backend
+        run: |
+          mkdir -p "$RUNNER_TEMP/ws" "$RUNNER_TEMP/data1"
+          pixi run python - <<PY
+          from pathlib import Path
+          from gdl.config import DataDir, Settings
+          s = Settings()
+          s.update(s.get(), backend="pixi", profile="kitchen", port=8899,
+                   workspace=str(Path(r"$RUNNER_TEMP") / "ws"),
+                   data=[DataDir("d1", str(Path(r"$RUNNER_TEMP") / "data1"), True)])
+          PY
+          cat geodatalab.toml
+
+      - name: Build (install kitchen + post-install steps)
+        run: pixi run build
+
+      - name: Start, reach Jupyter with the token, stop
+        run: |
+          pixi run start
+          pixi run status
+          URL=$(pixi run url 2>/dev/null | grep -o 'http[^ ]*')
+          echo "URL: $URL"
+          curl -sf -o /dev/null "$URL"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8899/api/contents)" = 403
+          pixi run stop
+          pixi run status | grep -q 'State: *stopped'
+
+      - name: Smoke test (kitchen)
+        env:
+          GDL_BACKEND: pixi
+          GDL_PROFILE: kitchen
+        run: pixi run -e kitchen python tests/smoke.py
+
+      - name: Jupyter log on failure
+        if: failure()
+        run: cat .gdl/default/jupyter.log || true
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck entrypoint.sh
+        run: shellcheck entrypoint.sh

@@ -175,7 +175,8 @@ def detect_runtime() -> tuple[str, list[str]]:
     global _RUNTIME
     if _RUNTIME:
         return _RUNTIME
-    for rt in ("podman", "docker"):
+    wanted = os.environ.get("GDL_RUNTIME")  # podman | docker; default: podman, then docker
+    for rt in ([wanted] if wanted else ["podman", "docker"]):
         if not shutil.which(rt):
             continue
         if capture([rt, "compose", "version"]):

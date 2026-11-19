@@ -1,0 +1,41 @@
+name: container
+
+# The image build compiles PDAL and takes a while: run it when the image
+# inputs change, or by hand.
+on:
+  push:
+    paths: [Dockerfile, compose.yml, entrypoint.sh, "requirements/**", tests/smoke.py, ".github/workflows/container.yml"]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Profile to build
+        default: kitchen
+        type: choice
+        options: [kitchen, lab, institute, r+julia]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      PROFILE: ${{ inputs.profile || 'kitchen' }}
+      GDL_RUNTIME: docker   # the runner has podman too
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.84.2
+          environments: default
+          locked: true
+      - name: Settings for the container backend
+        run: |
+          mkdir -p "$RUNNER_TEMP/ws"
+          pixi run python -c "
+          from gdl.config import Settings
+          s = Settings(); s.update(s.get(), backend='container', profile='$PROFILE', workspace='$RUNNER_TEMP/ws')"
+      - name: Build image
+        run: pixi run build --profile "$PROFILE"
+      - name: Start, smoke test, stop
+        run: |
+          pixi run start
+          docker exec geodatalab python /opt/geodatalab/smoke.py
+          pixi run stop
