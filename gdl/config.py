@@ -98,22 +98,31 @@ class Settings:
         return self.path.exists()
 
     def names(self) -> list[str]:
-        return ["default", *sorted(self.instances)]
+        """Instance names. 'default' is the top level of the file; it is gone
+        only after being deleted (file exists, top level empty)."""
+        has_default = bool(self.base) or not self.exists
+        return (["default"] if has_default else []) + sorted(self.instances)
 
     def get(self, name: str = "default") -> Instance:
-        if name != "default" and name not in self.instances:
-            raise GdlError(f"No instance '{name}'.")
-        merged = {**self.base, **(self.instances.get(name, {}))}
+        if name not in self.names():
+            others = ", ".join(self.names()) or "none"
+            raise GdlError(f"No instance '{name}' (instances: {others}).")
+        inst = self._resolve(name)
+        if os.environ.get("GDL_BACKEND"):  # one-off override, never saved
+            inst.backend = os.environ["GDL_BACKEND"]
+        if inst.backend not in BACKENDS:
+            raise GdlError(f"Unknown backend '{inst.backend}' (valid: {', '.join(BACKENDS)})")
+        return inst
+
+    def _resolve(self, name: str) -> Instance:
+        """Top-level values + the instance's overrides (no existence check)."""
+        merged = {**self.base, **(self.instances.get(name, {}) if name != "default" else {})}
         inst = Instance(name=name)
         for k, v in merged.items():
             if k == "data":
                 inst.data = [DataDir(d["name"], d["path"], bool(d.get("ro", False))) for d in v]
             elif k in KEYS:
                 setattr(inst, k, int(v) if k == "port" else v)
-        if os.environ.get("GDL_BACKEND"):  # one-off override, never saved
-            inst.backend = os.environ["GDL_BACKEND"]
-        if inst.backend not in BACKENDS:
-            raise GdlError(f"Unknown backend '{inst.backend}' (valid: {', '.join(BACKENDS)})")
         return inst
 
     def update(self, inst: Instance, **changes) -> Instance:
@@ -132,23 +141,36 @@ class Settings:
         if inst.name == "default":
             self.base = {k: v for k, v in values.items() if v not in ("", [])}
             return
-        base = self.get("default")
+        base = self._resolve("default")
         self.instances[inst.name] = {
             k: v for k, v in values.items()
             if k == "port" or v != _plain(getattr(base, k))
         }
 
     def new_instance(self, name: str) -> Instance:
-        if not INSTANCE_RE.match(name) or name == "default":
-            raise GdlError("Instance names: lowercase letters, digits and '-', not 'default'.")
-        if name in self.instances:
+        if not INSTANCE_RE.match(name):
+            raise GdlError("Instance names: lowercase letters, digits and '-'.")
+        if name in self.names():
             raise GdlError(f"Instance '{name}' already exists.")
-        self.instances[name] = {"port": self.free_port(exclude=name)}
+        if name == "default":  # recreating a deleted default instance
+            self.base = {"port": self.free_port(exclude=name)}
+        else:
+            self.instances[name] = {"port": self.free_port(exclude=name)}
         self.save()
         return self.get(name)
 
     def remove_instance(self, name: str) -> None:
-        self.instances.pop(name, None)
+        """Forget an instance. Deleting 'default' first writes the values the
+        other instances inherited from it into their own tables."""
+        if name == "default":
+            plain = Instance()
+            for n in self.instances:
+                inst = self._resolve(n)
+                self.instances[n] = {k: _plain(getattr(inst, k)) for k in KEYS
+                                     if k == "port" or _plain(getattr(inst, k)) != _plain(getattr(plain, k))}
+            self.base = {}
+        else:
+            self.instances.pop(name, None)
         self.save()
 
     def free_port(self, exclude: str = "") -> int:

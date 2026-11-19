@@ -10,7 +10,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Grid, Horizontal, Vertical
+from textual.containers import Center, Grid, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import (Button, Checkbox, DataTable, Footer, Header, Input, Label, RichLog,
                              Select, Static, TabbedContent, TabPane)
@@ -21,10 +21,12 @@ from .config import (BACKENDS, MODES, PROFILES, DataDir, GdlError, Instance, Set
 from .render import remove_state
 
 
-def logo() -> Text:
-    """The geodatalab globe (ANSI art from the original geodatalab.sh) + title."""
+def logo() -> ComposeResult:
+    """The geodatalab globe (ANSI art from the original geodatalab.sh), centered, + title."""
     art = Text.from_ansi((Path(__file__).parent / "logo.ans").read_text(encoding="utf-8").rstrip("\n"))
-    return Text.assemble(art, "\n  ", ("geodatalab", "bold"), "  —  GIS Data Laboratory")
+    with Center(classes="logo"):
+        yield Static(art, classes="logo-art")
+    yield Static(Text.assemble(("geodatalab", "bold"), "  —  GIS Data Laboratory"), classes="logo-title")
 
 
 def options(d: dict) -> list[tuple[str, str]]:
@@ -64,7 +66,7 @@ class Setup(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Static(logo(), classes="logo")
+            yield from logo()
             yield Label("[b]Welcome to geodatalab[/b] — set up your workbench")
             yield Label("Backend")
             yield Select(options(BACKENDS), value="pixi", allow_blank=False, id="backend")
@@ -95,7 +97,9 @@ class GeodatalabApp(App):
     #tabs { width: 1fr; }
     #side { width: 44; border-right: solid $primary-darken-2; }
     #side Label { padding: 0 1; text-style: bold; }
-    .logo { height: auto; padding: 1 1 1 0; }
+    .logo { height: auto; padding-top: 1; }
+    .logo-art { width: auto; }
+    .logo-title { width: 1fr; text-align: center; padding-bottom: 1; }
     .hint { color: $text-muted; padding-top: 1; height: auto; }
     #overview { padding: 1 2; height: auto; }
     .buttons { height: auto; padding: 0 1; }
@@ -121,7 +125,8 @@ class GeodatalabApp(App):
     def __init__(self, instance: str = "default"):
         super().__init__()
         self.settings = Settings()
-        self.current = instance
+        names = self.settings.names()
+        self.current = instance if instance in names or not names else names[0]
         self.follow_stop: threading.Event | None = None
 
     # ── layout ─────────────────────────────────────────────────────────────────
@@ -130,7 +135,7 @@ class GeodatalabApp(App):
         yield Header()
         with Horizontal():
             with Vertical(id="side"):
-                yield Static(logo(), classes="logo")
+                yield from logo()
                 yield Label("Instances")
                 yield DataTable(id="instances", cursor_type="row", zebra_stripes=True)
             with TabbedContent(id="tabs"):
@@ -172,17 +177,18 @@ class GeodatalabApp(App):
         self.columns = self.query_one("#instances", DataTable).add_columns("Instance", "Backend", "Port", "State")
         self.query_one("#data", DataTable).add_columns("Name", "Read-only", "Path")
         self.query_one("#instances", DataTable).focus()
-        if not self.settings.exists:
+        if not self.settings.exists or not self.settings.names():  # first run, or all deleted
             self.push_screen(Setup(), self.first_run)
         self.show_instance()
         self.refresh_states()
         self.set_interval(5, self.refresh_states)
 
     def first_run(self, values: dict) -> None:
-        inst = self.settings.get("default")
-        self.settings.update(inst, **values)
-        self.notify("Created geodatalab.toml. Next: Build (b), then Start (s).")
+        self.current = "default"
+        self.settings.update(Instance(port=self.settings.free_port(exclude="default")), **values)
+        self.notify("Created the 'default' instance. Next: Build (b), then Start (s).")
         self.show_instance()
+        self.refresh_states()
 
     # ── state ──────────────────────────────────────────────────────────────────
 
@@ -195,6 +201,9 @@ class GeodatalabApp(App):
 
     @work(thread=True, exclusive=True, group="refresh")
     def refresh_states(self) -> None:
+        if self.current not in self.settings.names():
+            self.call_from_thread(self.paint_states, [], "", None)
+            return
         rows = []
         for n in self.settings.names():
             inst = self.settings.get(n)
@@ -225,6 +234,9 @@ class GeodatalabApp(App):
             for c in cells:
                 for col, value in zip(self.columns[1:], c[1:]):
                     table.update_cell(c[0], col, value)
+        if self.current not in names:
+            self.query_one("#overview", Static).update("No instances. Press n to create one.")
+            return
         i = self.inst
         state = dict((r[0], r[3]) for r in rows).get(self.current, "?")
         # Text objects, not markup: paths and URLs may contain [ ] characters
@@ -238,6 +250,8 @@ class GeodatalabApp(App):
         self.query_one("#overview", Static).update(Text("\n").join(lines))
 
     def show_instance(self) -> None:
+        if self.current not in self.settings.names():
+            return
         i = self.inst
         for key in ("backend", "profile", "mode"):
             self.query_one(f"#f-{key}", Select).value = getattr(i, key)
@@ -364,10 +378,11 @@ class GeodatalabApp(App):
 
     def action_delete(self) -> None:
         name = self.current
-        if name == "default":
-            self.notify("The default instance can't be deleted.", severity="warning")
+        if name not in self.settings.names():
             return
-        self.push_screen(Ask(f"Delete instance '{name}'? (config + generated state; data untouched)"),
+        extra = " The other instances keep their current settings." if name == "default" else ""
+        self.push_screen(Ask(f"Delete instance '{name}'? Its config and generated state go; "
+                             f"workspace and data folders are untouched.{extra}"),
                          lambda ok: ok and self.delete(name))
 
     @work(thread=True, exclusive=True, group="op")
@@ -385,9 +400,13 @@ class GeodatalabApp(App):
                 pass
         remove_state(inst)
         self.settings.remove_instance(name)
-        self.current = "default"
+        names = self.settings.names()
+        self.current = names[0] if names else "default"
+        self.call_from_thread(self.notify, f"Deleted instance '{name}'.")
         self.call_from_thread(self.show_instance)
         self.call_from_thread(self.refresh_states)
+        if not names:  # nothing left: set up a new default instance
+            self.call_from_thread(self.push_screen, Setup(), self.first_run)
 
     # ── settings & data ────────────────────────────────────────────────────────
 

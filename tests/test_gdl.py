@@ -133,8 +133,31 @@ class TestSettings(Base):
         self.assertEqual((i.memory, i.data), ("8G", [DataDir("a", "/a", True)]))
         self.assertIn("[limits]", self.toml.read_text())
 
+    def test_delete_default(self):
+        s = Settings(self.toml)
+        s.update(config.Instance(), workspace="/w", profile="lab", memory="8G")
+        s.new_instance("pinhel")
+        s.update(s.get("pinhel"), profile="kitchen")
+        s.remove_instance("default")
+        s = Settings(self.toml)
+        self.assertEqual(s.names(), ["pinhel"])
+        p = s.get("pinhel")  # kept what it inherited
+        self.assertEqual((p.workspace, p.profile, p.memory, p.port), ("/w", "kitchen", "8G", 8889))
+        with self.assertRaises(GdlError):
+            s.get("default")
+        d = s.new_instance("default")  # can be recreated
+        self.assertEqual(s.names(), ["default", "pinhel"])
+        self.assertEqual(d.port, 8888)
+
+    def test_delete_everything(self):
+        s = Settings(self.toml)
+        s.update(config.Instance(), workspace="/w")
+        s.remove_instance("default")
+        self.assertEqual(Settings(self.toml).names(), [])
+
     def test_validation(self):
         s = Settings(self.toml)
+        s.update(config.Instance(), workspace="/w")
         for bad in ("default", "Bad", "-x"):
             with self.assertRaises(GdlError):
                 s.new_instance(bad)
@@ -213,6 +236,17 @@ class TestTui(Base):
                 await pilot.pause()
                 self.assertEqual(app.current, "pinhel")
                 self.assertIn("pinhel", Settings(self.toml).instances)
+                # delete every instance, default included
+                for name in ("pinhel", "default"):
+                    app.current = name
+                    await pilot.press("d")
+                    await pilot.pause()
+                    await pilot.click("#ok")
+                    await app.workers.wait_for_complete()
+                    await pilot.pause()
+                    self.assertNotIn(name, Settings(self.toml).names())
+                self.assertEqual(Settings(self.toml).names(), [])
+                self.assertEqual(type(app.screen).__name__, "Setup")  # offers a new default
         asyncio.run(go())
 
 
