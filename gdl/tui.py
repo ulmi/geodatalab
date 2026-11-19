@@ -74,6 +74,12 @@ class Setup(ModalScreen):
             yield Input(str(Path.home() / "geodatalab"), id="workspace")
             with Horizontal(classes="buttons"):
                 yield Button("Create", variant="primary", id="ok")
+            yield Static(Text.assemble(
+                ("Tab", "bold"), " / ", ("Shift+Tab", "bold"), "  next / previous field\n",
+                ("Enter", "bold"), " or ", ("Space", "bold"), "  open a list · ",
+                ("↑ ↓", "bold"), " choose · ", ("Enter", "bold"), " pick · ", ("Esc", "bold"), " close\n",
+                ("Enter", "bold"), " in the folder field, or ", ("Create", "bold"), ", saves"),
+                classes="hint")
 
     @on(Button.Pressed, "#ok")
     @on(Input.Submitted, "#workspace")
@@ -90,6 +96,7 @@ class GeodatalabApp(App):
     #side { width: 44; border-right: solid $primary-darken-2; }
     #side Label { padding: 0 1; text-style: bold; }
     .logo { height: auto; padding: 1 1 1 0; }
+    .hint { color: $text-muted; padding-top: 1; height: auto; }
     #overview { padding: 1 2; height: auto; }
     .buttons { height: auto; padding: 0 1; }
     .buttons Button { margin-right: 1; }
