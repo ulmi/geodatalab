@@ -14,7 +14,7 @@ A headless GIS workstation served through JupyterLab and [JupyterGIS](https://ju
 
 ## About
 
-This grew out of several projects, cause I was tired of setting up every machine again and juggling what each project needed. I also wanted to come back to a hibernating project after several months and find it still working, not broken by newer packages, and also cause I'm sort of an "Evel Knievel" distro hopper, so my setup has to survive the next jump. The idea had been around for a while; it only came together now, with the "advent" of AI.
+This grew out of several projects, cause I was tired of setting up every machine again and juggling what each project needed. I also wanted to come back to a hibernating project after several months and find it still working, not broken by newer packages, and also cause I'm sort of an "Evel Knievel" distro hopper, so my setup has to survive the next jump. The project was already somehow working, but scattered and held together with a lot of tape. Only now, with the "advent" of AI, did it come to fruition, and it's somewhat ready for the public.
 
 ## Quick start
 
