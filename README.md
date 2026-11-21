@@ -12,6 +12,10 @@
 
 A headless GIS workstation served through JupyterLab and [JupyterGIS](https://jupytergis.readthedocs.io). Use the browser, VS Code Dev Containers, or a shell. One manager drives every backend, with the same profiles and the same folder layout.
 
+## About
+
+This grew out of several projects. I was tired of setting up every machine again and juggling what each project needed. I also wanted to come back to a project after months of hibernation and find it still working, not broken by newer packages. And I'm an Evel Knievel of distro hopping, so my setup has to survive the next jump. The idea had been around for a while; it only came together now, with AI's help.
+
 ## Quick start
 
 The only thing to install is [pixi](https://pixi.sh). Docker or Podman is needed only for the container backend.
