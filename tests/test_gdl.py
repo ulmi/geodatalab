@@ -285,32 +285,61 @@ class TestPixiPlatform(Base):
 
 
 class TestTui(Base):
-    def test_first_run_and_new_instance(self):
+    def test_wizard_and_delete_all(self):
         import asyncio
+        from textual.widgets import Select, Static
         from gdl.tui import GeodatalabApp
 
         async def go():
             app = GeodatalabApp()
             async with app.run_test(size=(120, 50)) as pilot:
                 await pilot.pause()
-                await pilot.click("#ok")  # Setup screen: accept defaults
+                # first open: main screen with a welcome, no forced dialog
+                self.assertEqual(type(app.screen).__name__, "Screen")
+                self.assertIn("No instances yet", str(app.query_one("#overview", Static).render()))
+                self.assertFalse(self.toml.exists())
+
+                # wizard: workbench (name suggested as "default"), step 1 → Enter → step 2 → Create
+                await pilot.click("#do-new")
                 await pilot.pause()
-                self.assertTrue(self.toml.exists())
+                self.assertEqual(type(app.screen).__name__, "Wizard")
+                await pilot.press("enter")          # name "default" → next
+                await pilot.pause()
+                app.screen.query_one("#profile", Select).value = "lab"
+                await pilot.click("#ok")
+                await pilot.pause()
+                d = Settings(self.toml).get("default")
+                self.assertEqual((d.kind, d.backend, d.profile, d.port), ("workbench", "pixi", "lab", 8888))
+
+                # a second workbench
                 await pilot.press("n")
                 await pilot.pause()
                 for ch in "pinhel":
                     await pilot.press(ch)
                 await pilot.press("enter")
                 await pilot.pause()
-                self.assertEqual(app.current, "pinhel")
-                self.assertIn("pinhel", Settings(self.toml).instances)
-                # a PostGIS service through the same dialog
-                from textual.widgets import Select
+                await pilot.click("#ok")
+                await pilot.pause()
+                self.assertEqual((app.current, Settings(self.toml).get("pinhel").port), ("pinhel", 8889))
+
+                # a name that is taken stays on step 1
+                await pilot.press("n")
+                await pilot.pause()
+                for ch in "pinhel":
+                    await pilot.press(ch)
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(app.screen.step, 1)
+                await pilot.press("escape")
+                await pilot.pause()
+
+                # a PostGIS service, alpine image
                 await pilot.press("n")
                 await pilot.pause()
                 for ch in "gisdb":
                     await pilot.press(ch)
                 app.screen.query_one("#type", Select).value = "postgis"
+                await pilot.click("#next")
                 await pilot.pause()
                 app.screen.query_one("#variant", Select).value = "alpine"
                 await pilot.click("#ok")
@@ -318,7 +347,8 @@ class TestTui(Base):
                 db = Settings(self.toml).get("gisdb")
                 self.assertTrue(db.is_service and db.image.endswith("-alpine"))
                 self.assertEqual(app.current, "gisdb")
-                # delete every instance, default included
+
+                # delete every instance, default included → back to the welcome
                 for name in ("gisdb", "pinhel", "default"):
                     app.current = name
                     await pilot.press("d")
@@ -328,7 +358,11 @@ class TestTui(Base):
                     await pilot.pause()
                     self.assertNotIn(name, Settings(self.toml).names())
                 self.assertEqual(Settings(self.toml).names(), [])
-                self.assertEqual(type(app.screen).__name__, "Setup")  # offers a new default
+                self.assertEqual(type(app.screen).__name__, "Screen")  # no forced dialog
+                app.refresh_states()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertIn("No instances yet", str(app.query_one("#overview", Static).render()))
         asyncio.run(go())
 
 

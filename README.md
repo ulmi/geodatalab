@@ -27,7 +27,7 @@ cd geodatalab
 pixi run gdl          # opens the manager
 ```
 
-On first run the manager asks for a backend, a profile and a workspace folder, and writes `geodatalab.toml`. Then press **b** to build and **s** to start.
+The manager opens on an empty list. Press **n** (or **New instance…**) to start the wizard. Step 1 asks for a name and a type: a **workbench** (JupyterLab + GIS stack) or a **service** from a template, such as PostGIS. Step 2 asks what that type needs: backend, profile and workspace folder for a workbench, or the image for a service. The settings go to `geodatalab.toml`. Then press **b** to build a workbench and **s** to start.
 
 ## The manager
 

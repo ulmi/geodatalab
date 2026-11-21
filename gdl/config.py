@@ -164,7 +164,7 @@ class Settings:
         """A new workbench, or a service made from `template` (image `variant`)."""
         if not INSTANCE_RE.match(name):
             raise GdlError("Instance names: lowercase letters, digits and '-'.")
-        if name in self.names():
+        if self.exists and name in self.names():  # before the file exists, nothing is taken
             raise GdlError(f"Instance '{name}' already exists.")
         inst = self._resolve(name) if name != "default" else Instance()
         inst.name = name
@@ -204,7 +204,7 @@ class Settings:
         self.save()
 
     def free_port(self, exclude: str = "", start: int = 8888) -> int:
-        used = {self.get(n).port for n in self.names() if n != exclude}
+        used = {self.get(n).port for n in (self.names() if self.exists else []) if n != exclude}
         p = start
         while p in used or port_open(p):
             p += 1

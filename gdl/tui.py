@@ -16,7 +16,7 @@ from textual.widgets import (Button, Checkbox, DataTable, Footer, Header, Input,
                              Select, Static, TabbedContent, TabPane)
 
 from .backends import Backend, backend_for
-from .config import (BACKENDS, MODES, PROFILES, DataDir, GdlError, Instance, Settings,
+from .config import (BACKENDS, INSTANCE_RE, MODES, PROFILES, DataDir, GdlError, Instance, Settings,
                      check_data_name)
 from .render import NETWORK, remove_state, service_url
 from .templates import load as load_templates
@@ -48,8 +48,8 @@ class Ask(ModalScreen):
             if self.field is not None:
                 yield Input(placeholder=self.field, id="answer")
             with Horizontal(classes="buttons"):
-                yield Button("OK", variant="primary", id="ok")
-                yield Button("Cancel", id="cancel")
+                yield Button("OK", variant="primary", id="ok", compact=True)
+                yield Button("Cancel", id="cancel", compact=True)
 
     @on(Button.Pressed)
     @on(Input.Submitted)
@@ -62,94 +62,119 @@ class Ask(ModalScreen):
             self.dismiss(True)
 
 
-class Setup(ModalScreen):
-    """First run: the essentials for the default instance."""
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="dialog"):
-            yield from logo()
-            yield Label("[b]Welcome to geodatalab[/b] — set up your workbench")
-            yield Label("Backend")
-            yield Select(options(BACKENDS), value="pixi", allow_blank=False, id="backend")
-            yield Label("Profile")
-            yield Select(options(PROFILES), value="kitchen", allow_blank=False, id="profile")
-            yield Label("Workspace folder (your notebooks and projects)")
-            yield Input(str(Path.home() / "geodatalab"), id="workspace")
-            with Horizontal(classes="buttons"):
-                yield Button("Create", variant="primary", id="ok")
-            yield Static(Text.assemble(
-                ("Tab", "bold"), " / ", ("Shift+Tab", "bold"), "  next / previous field\n",
-                ("Enter", "bold"), " or ", ("Space", "bold"), "  open a list · ",
-                ("↑ ↓", "bold"), " choose · ", ("Enter", "bold"), " pick · ", ("Esc", "bold"), " close\n",
-                ("Enter", "bold"), " in the folder field, or ", ("Create", "bold"), ", saves"),
-                classes="hint")
-
-    @on(Button.Pressed, "#ok")
-    @on(Input.Submitted, "#workspace")
-    def create(self) -> None:
-        self.dismiss({"backend": self.query_one("#backend", Select).value,
-                      "profile": self.query_one("#profile", Select).value,
-                      "workspace": str(Path(self.query_one("#workspace", Input).value).expanduser())})
+NAV_HINT = Text.assemble(
+    ("Tab", "bold"), " / ", ("Shift+Tab", "bold"), "  next / previous field\n",
+    ("Enter", "bold"), " or ", ("Space", "bold"), "  open a list · ",
+    ("↑ ↓", "bold"), " choose · ", ("Enter", "bold"), " pick · ", ("Esc", "bold"), " close")
 
 
-class NewInstance(ModalScreen):
-    """Name + type: a workbench, or a service from a template (with its image variant)."""
+class Wizard(ModalScreen):
+    """Create an instance in two steps: 1) name + type, 2) what that type needs
+    (workbench: backend, profile, workspace · service: image variant).
+    Dismisses with a dict, or None when cancelled."""
     WORKBENCH = "workbench"
 
-    def __init__(self):
+    def __init__(self, taken: list[str], suggested: str = ""):
         super().__init__()
+        self.taken, self.suggested, self.step = taken, suggested, 1
         self.templates = load_templates()
 
     def compose(self) -> ComposeResult:
         types = [("Workbench  —  JupyterLab + GIS stack (pixi or container)", self.WORKBENCH)]
         types += [(f"{t.name}  —  {t.description}", k) for k, t in self.templates.items()]
         with Vertical(id="dialog"):
-            yield Label("[b]New instance[/b]")
-            yield Label("Name")
-            yield Input(placeholder="lowercase letters, digits, -", id="name")
-            yield Label("Type")
-            yield Select(types, value=self.WORKBENCH, allow_blank=False, id="type")
-            yield Label("Image", id="variant-label")
-            yield Select([("-", "-")], allow_blank=False, id="variant")
+            yield Label(id="title")
+            with Vertical(id="step1", classes="step"):
+                yield Label("Name")
+                yield Input(self.suggested, placeholder="lowercase letters, digits, -", id="name")
+                yield Label("Type")
+                yield Select(types, value=self.WORKBENCH, allow_blank=False, id="type")
+            with Vertical(id="step2-wb", classes="step"):
+                yield Label("Backend")
+                yield Select(options(BACKENDS), value="pixi", allow_blank=False, id="backend")
+                yield Label("Profile")
+                yield Select(options(PROFILES), value="kitchen", allow_blank=False, id="profile")
+                yield Label("Workspace folder (your notebooks and projects)")
+                yield Input(str(Path.home() / "geodatalab"), id="workspace")
+            with Vertical(id="step2-svc", classes="step"):
+                yield Label("Image")
+                yield Select([("-", "-")], allow_blank=False, id="variant")
+                yield Static(Text(f"Services join the '{NETWORK}' network: other containers reach "
+                                  "them by instance name, pixi workbenches through localhost. Every "
+                                  "workbench gets their addresses as GDL_SERVICE_<NAME>."), classes="hint")
             with Horizontal(classes="buttons"):
-                yield Button("Create", variant="primary", id="ok")
-                yield Button("Cancel", id="cancel")
-            yield Static(Text(f"Services join the '{NETWORK}' network: other containers reach them by "
-                              "instance name, pixi workbenches through localhost. Every workbench gets "
-                              "their addresses as GDL_SERVICE_<NAME>."), classes="hint")
+                yield Button("Back", id="back", compact=True)
+                yield Button("Next", variant="primary", id="next", compact=True)
+                yield Button("Create", variant="primary", id="ok", compact=True)
+                yield Button("Cancel", id="cancel", compact=True)
+            yield Static(NAV_HINT, classes="hint")
 
     def on_mount(self) -> None:
-        self.show_variants(self.WORKBENCH)
+        self.show_step()
 
-    @on(Select.Changed, "#type")
-    def type_changed(self, event: Select.Changed) -> None:
-        self.show_variants(event.value)
+    @property
+    def template(self) -> str:
+        key = self.query_one("#type", Select).value
+        return "" if key == self.WORKBENCH else key
 
-    def show_variants(self, key) -> None:
-        t = self.templates.get(key)
-        variants = list(t.images.items()) if t else []
-        sel = self.query_one("#variant", Select)
-        if variants:
-            sel.set_options([(f"{v}  —  {img}", v) for v, img in variants])
-            sel.value = variants[0][0]
-        for w in (sel, self.query_one("#variant-label")):
-            w.display = len(variants) > 1
+    def show_step(self) -> None:
+        svc = bool(self.template)
+        self.query_one("#title", Label).update(
+            f"[b]Create an instance[/b] — step {self.step} of 2"
+            + ("" if self.step == 1 else f": {'service' if svc else 'workbench'} '{self.name_value}'"))
+        self.query_one("#step1").display = self.step == 1
+        self.query_one("#step2-wb").display = self.step == 2 and not svc
+        self.query_one("#step2-svc").display = self.step == 2 and svc
+        for b, show in (("#back", self.step == 2), ("#next", self.step == 1), ("#ok", self.step == 2)):
+            self.query_one(b).display = show
+        focus = {1: "#name", 2: "#variant" if svc else "#workspace"}[self.step]
+        self.query_one(focus).focus()
+
+    @property
+    def name_value(self) -> str:
+        return self.query_one("#name", Input).value.strip()
+
+    @on(Button.Pressed, "#next")
+    @on(Input.Submitted, "#name")
+    def go_next(self) -> None:
+        name = self.name_value
+        if not INSTANCE_RE.match(name):
+            self.notify("Name: lowercase letters, digits and '-'.", severity="error")
+            return
+        if name in self.taken:
+            self.notify(f"Instance '{name}' already exists.", severity="error")
+            return
+        if self.template:
+            t = self.templates[self.template]
+            sel = self.query_one("#variant", Select)
+            sel.set_options([(f"{v}  —  {img}", v) for v, img in t.images.items()])
+            sel.value = next(iter(t.images))
+        self.step = 2
+        self.show_step()
+
+    @on(Button.Pressed, "#back")
+    def back(self) -> None:
+        self.step = 1
+        self.show_step()
 
     @on(Button.Pressed, "#cancel")
     def cancel(self) -> None:
         self.dismiss(None)
 
+    def key_escape(self) -> None:
+        self.dismiss(None)
+
     @on(Button.Pressed, "#ok")
-    @on(Input.Submitted, "#name")
+    @on(Input.Submitted, "#workspace")
     def create(self) -> None:
-        name = self.query_one("#name", Input).value.strip()
-        key = self.query_one("#type", Select).value
-        if not name:
-            self.notify("Enter a name.", severity="error")
-            return
-        template = "" if key == self.WORKBENCH else key
-        variant = self.query_one("#variant", Select).value if template else ""
-        self.dismiss((name, template, variant if variant != "-" else ""))
+        answer = {"name": self.name_value, "template": self.template, "variant": ""}
+        if self.template:
+            answer["variant"] = self.query_one("#variant", Select).value
+        else:
+            answer |= {"backend": self.query_one("#backend", Select).value,
+                       "profile": self.query_one("#profile", Select).value,
+                       "workspace": str(Path(self.query_one("#workspace", Input).value).expanduser())}
+        self.dismiss(answer)
 
 
 class GeodatalabApp(App):
@@ -163,17 +188,21 @@ class GeodatalabApp(App):
     .logo-title { width: 1fr; text-align: center; padding-bottom: 1; }
     .hint { color: $text-muted; padding-top: 1; height: auto; }
     #overview { padding: 1 2; height: auto; }
-    .buttons { height: auto; padding: 0 1; }
-    .buttons Button { margin-right: 1; }
+    .buttons { height: auto; padding: 1 1 0 1; }
+    .buttons Button { margin-right: 2; min-width: 0; width: auto; padding: 0 2; }
     #form { grid-size: 2; grid-columns: 18 1fr; grid-rows: auto; padding: 1 2; height: auto; grid-gutter: 0 1; }
     #form Label { padding-top: 1; }
     #data-add { height: auto; padding: 0 1; }
     #data-add Input { width: 1fr; }
     #data-add #d-name { width: 20; }
     #data-add Checkbox, #data-add Button { width: auto; }
+    #data-add Button { margin: 1 0 0 1; }
     #data { height: 1fr; }
     #dialog { width: 72; height: auto; max-height: 100%; overflow-y: auto; padding: 1 2; border: thick $primary; background: $surface; }
-    Ask, Setup, NewInstance { align: center middle; }
+    Ask, Wizard { align: center middle; }
+    .step { height: auto; }
+    #dialog .buttons { padding: 1 0 0 0; }
+    #dialog .buttons Button { margin-right: 2; }
     """
     BINDINGS = [
         Binding("s", "start", "Start"), Binding("x", "stop", "Stop"), Binding("r", "restart", "Restart"),
@@ -186,9 +215,14 @@ class GeodatalabApp(App):
     def __init__(self, instance: str = "default"):
         super().__init__()
         self.settings = Settings()
-        names = self.settings.names()
+        names = self.names()
         self.current = instance if instance in names or not names else names[0]
         self.follow_stop: threading.Event | None = None
+
+    def names(self) -> list[str]:
+        """Instances to show: none before geodatalab.toml exists (the CLI treats
+        that as an implicit default instance; the TUI offers the wizard)."""
+        return self.settings.names() if self.settings.exists else []
 
     # ── layout ─────────────────────────────────────────────────────────────────
 
@@ -204,7 +238,9 @@ class GeodatalabApp(App):
                     yield Static(id="overview")
                     with Horizontal(classes="buttons"):
                         for name in ("start", "stop", "restart", "open", "copy"):
-                            yield Button(name.capitalize() if name != "copy" else "Copy URL", id=f"do-{name}")
+                            yield Button(name.capitalize() if name != "copy" else "Copy URL", id=f"do-{name}",
+                                         compact=True)
+                        yield Button("New instance…", variant="primary", id="do-new", compact=True)
                 with TabPane("Settings", id="tab-settings"):
                     with Grid(id="form"):
                         # class "wb": workbenches only, "svc": services only
@@ -229,18 +265,18 @@ class GeodatalabApp(App):
                         yield Label("Memory res."); yield Input(id="f-memory_reserve", placeholder="e.g. 4G")
                         yield Label("CPUs");      yield Input(id="f-cpus", placeholder="e.g. 6")
                     with Horizontal(classes="buttons"):
-                        yield Button("Save", variant="primary", id="save")
+                        yield Button("Save", variant="primary", id="save", compact=True)
                 with TabPane("Data", id="tab-data"):
                     yield DataTable(id="data", cursor_type="row")
                     with Horizontal(id="data-add"):
                         yield Input(placeholder="name", id="d-name")
                         yield Input(placeholder="/path/to/folder", id="d-path")
                         yield Checkbox("read-only", id="d-ro")
-                        yield Button("Add", id="d-add")
+                        yield Button("Add", id="d-add", compact=True)
                     with Horizontal(classes="buttons"):
-                        yield Button("Remove", id="d-rm")
-                        yield Button("Toggle read-only", id="d-toggle")
-                        yield Button("Jupyter opens here", id="d-open")
+                        yield Button("Remove", id="d-rm", compact=True)
+                        yield Button("Toggle read-only", id="d-toggle", compact=True)
+                        yield Button("Jupyter opens here", id="d-open", compact=True)
                 with TabPane("Log", id="tab-log"):
                     yield RichLog(id="log", wrap=True, max_lines=5000)
         yield Footer()
@@ -249,18 +285,9 @@ class GeodatalabApp(App):
         self.columns = self.query_one("#instances", DataTable).add_columns("Instance", "Kind", "Port", "State")
         self.query_one("#data", DataTable).add_columns("Name", "Read-only", "Path")
         self.query_one("#instances", DataTable).focus()
-        if not self.settings.exists or not self.settings.names():  # first run, or all deleted
-            self.push_screen(Setup(), self.first_run)
         self.show_instance()
         self.refresh_states()
         self.set_interval(5, self.refresh_states)
-
-    def first_run(self, values: dict) -> None:
-        self.current = "default"
-        self.settings.update(Instance(port=self.settings.free_port(exclude="default")), **values)
-        self.notify("Created the 'default' instance. Next: Build (b), then Start (s).")
-        self.show_instance()
-        self.refresh_states()
 
     # ── state ──────────────────────────────────────────────────────────────────
 
@@ -273,11 +300,11 @@ class GeodatalabApp(App):
 
     @work(thread=True, exclusive=True, group="refresh")
     def refresh_states(self) -> None:
-        if self.current not in self.settings.names():
+        if self.current not in self.names():
             self.call_from_thread(self.paint_states, [], "", None)
             return
         rows = []
-        for n in self.settings.names():
+        for n in self.names():
             inst = self.settings.get(n)
             be = backend_for(self.settings, inst)
             running = be.is_running()
@@ -309,8 +336,15 @@ class GeodatalabApp(App):
             for c in cells:
                 for col, value in zip(self.columns[1:], c[1:]):
                     table.update_cell(c[0], col, value)
-        if self.current not in names:
-            self.query_one("#overview", Static).update("No instances. Press n to create one.")
+        empty = self.current not in names
+        for b in ("start", "stop", "restart", "open", "copy"):  # nothing to act on yet
+            self.query_one(f"#do-{b}").display = not empty
+        if empty:
+            self.query_one("#overview", Static).update(Text.assemble(
+                ("Welcome to geodatalab", "bold"), "\n\nNo instances yet. Press ", ("n", "bold"),
+                " (or New instance below) to create one:\n",
+                "  • a workbench: JupyterLab + GIS stack, on pixi or in a container\n",
+                "  • a service from a template, such as a PostGIS database"))
             return
         i = self.inst
         state = dict((r[0], r[3]) for r in rows).get(self.current, "?")
@@ -333,7 +367,7 @@ class GeodatalabApp(App):
         self.query_one("#overview", Static).update(Text("\n").join(lines))
 
     def show_instance(self) -> None:
-        if self.current not in self.settings.names():
+        if self.current not in self.names():
             return
         i = self.inst
         for w in self.query(".wb"):
@@ -406,6 +440,8 @@ class GeodatalabApp(App):
     def _b4(self): self.action_open()
     @on(Button.Pressed, "#do-copy")
     def _b5(self): self.action_copy()
+    @on(Button.Pressed, "#do-new")
+    def _b6(self): self.action_new()
 
     @work(thread=True, group="url")
     def action_open(self) -> None:
@@ -462,21 +498,26 @@ class GeodatalabApp(App):
         def create(answer):
             if not answer:
                 return
-            name, template, variant = answer
+            name = answer["name"]
             try:
-                inst = self.settings.new_instance(name, template, variant)
+                inst = self.settings.new_instance(name, answer["template"], answer["variant"])
+                if not inst.is_service:
+                    inst = self.settings.update(inst, backend=answer["backend"], profile=answer["profile"],
+                                                workspace=answer["workspace"])
                 self.current = inst.name
                 what = f"{inst.template} service" if inst.is_service else "workbench"
-                self.notify(f"Created {what} '{name}' on port {inst.port}. Start it with s.")
+                hint = "Start it with s." if inst.is_service else "Build it with b, then start with s."
+                self.notify(f"Created {what} '{name}' on port {inst.port}. {hint}")
                 self.show_instance()
                 self.refresh_states()
             except GdlError as e:
                 self.notify(str(e), severity="error")
-        self.push_screen(NewInstance(), create)
+        names = self.names()
+        self.push_screen(Wizard(taken=names, suggested="" if names else "default"), create)
 
     def action_delete(self) -> None:
         name = self.current
-        if name not in self.settings.names():
+        if name not in self.names():
             return
         extra = " The other instances keep their current settings." if name == "default" else ""
         if self.inst.is_service:
@@ -500,13 +541,11 @@ class GeodatalabApp(App):
                 pass
         remove_state(inst)
         self.settings.remove_instance(name)
-        names = self.settings.names()
+        names = self.names()
         self.current = names[0] if names else "default"
         self.call_from_thread(self.notify, f"Deleted instance '{name}'.")
         self.call_from_thread(self.show_instance)
         self.call_from_thread(self.refresh_states)
-        if not names:  # nothing left: set up a new default instance
-            self.call_from_thread(self.push_screen, Setup(), self.first_run)
 
     # ── settings & data ────────────────────────────────────────────────────────
 
