@@ -70,6 +70,74 @@ jobs:
         if: failure()
         run: cat .gdl/default/jupyter.log || true
 
+  services:
+    name: PostGIS service + connections (${{ matrix.runtime }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [docker, podman]
+    env:
+      GDL_RUNTIME: ${{ matrix.runtime }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.84.2
+          environments: default kitchen
+          locked: true
+          cache: true
+
+      - name: podman-compose
+        if: matrix.runtime == 'podman'
+        run: pipx install podman-compose && podman --version && podman-compose version
+
+      - name: Instances (pixi workbench + PostGIS service, alpine image)
+        run: |
+          mkdir -p "$RUNNER_TEMP/ws"
+          pixi run python - <<PY
+          from gdl.config import Settings
+          s = Settings()
+          s.update(s.get(), backend="pixi", profile="kitchen", workspace="$RUNNER_TEMP/ws")
+          s.new_instance("gisdb", "postgis", "alpine")
+          PY
+          cat geodatalab.toml
+
+      - name: Start PostGIS through the manager
+        run: |
+          pixi run gdl -i gisdb start
+          pixi run gdl -i gisdb status
+          $GDL_RUNTIME exec geodatalab-gisdb psql -U gis -d gis -tc 'select postgis_full_version()'
+
+      - name: Container → service by name (shared network)
+        run: $GDL_RUNTIME run --rm --network geodatalab docker.io/postgis/postgis:17-3.5-alpine pg_isready -h gisdb -p 5432
+
+      - name: pixi environment → service (GDL_SERVICE_GISDB, GeoDataFrame round trip)
+        run: |
+          export GDL_SERVICE_GISDB=$(pixi run python -c "from gdl.config import Settings; from gdl.render import service_urls; print(service_urls(Settings(), internal=False)['GDL_SERVICE_GISDB'])")
+          pixi run -e kitchen python - <<'PY'
+          import os
+          import geopandas as gpd
+          from shapely.geometry import Point
+          from sqlalchemy import create_engine
+          eng = create_engine(os.environ["GDL_SERVICE_GISDB"])
+          gdf = gpd.GeoDataFrame({"name": ["porto"]}, geometry=[Point(-8.61, 41.15)], crs=4326)
+          gdf.to_postgis("places", eng, if_exists="replace")
+          back = gpd.read_postgis("select * from places", eng, geom_col="geometry")
+          assert back.crs.to_epsg() == 4326 and back.iloc[0]["name"] == "porto"
+          print("PostGIS round trip OK:", back.iloc[0].geometry)
+          PY
+
+      - name: Stop
+        run: |
+          pixi run gdl -i gisdb stop
+          pixi run gdl -i gisdb status | grep -q 'State: *stopped'
+
+      - name: Container logs on failure
+        if: failure()
+        run: $GDL_RUNTIME logs geodatalab-gisdb || true
+
   lint:
     runs-on: ubuntu-latest
     steps:

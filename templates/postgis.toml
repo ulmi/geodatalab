@@ -1,0 +1,30 @@
+# Service template: PostgreSQL + PostGIS.
+#
+# A template describes a ready-made container. `pixi run gdl` → n (new
+# instance) → pick it. The instance's own settings (image, port, env,
+# shm_size) live in geodatalab.toml and override what is here.
+# Your own templates: drop a .toml like this one in templates.d/ (not committed).
+#
+# Placeholders: {ENV_VAR} = the instance's environment, {host}/{port} =
+# where it is reached (localhost:<host port> from your machine, or
+# <instance name>:<container port> from a container workbench).
+
+name = "PostGIS"
+description = "PostgreSQL + PostGIS database"
+port = 5432                          # port inside the container (host port: first free from here)
+volume = "/var/lib/postgresql/data"  # persistent data → named volume geodatalab-<instance>-data
+shm_size = "1g"                      # Docker's default 64 MB is too small for parallel queries
+health = "pg_isready -U {POSTGRES_USER} -d {POSTGRES_DB}"
+shell = ["psql", "-U", "{POSTGRES_USER}", "-d", "{POSTGRES_DB}"]
+url = "postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{host}:{port}/{POSTGRES_DB}"
+secrets = ["POSTGRES_PASSWORD"]      # generated per instance, stored in geodatalab.toml
+
+# Image variants; the first is the default. postgis/postgis publishes amd64
+# images only — on Apple Silicon they run emulated (or set another image).
+[images]
+debian = "docker.io/postgis/postgis:17-3.5"
+alpine = "docker.io/postgis/postgis:17-3.5-alpine"
+
+[env]
+POSTGRES_USER = "gis"
+POSTGRES_DB = "gis"

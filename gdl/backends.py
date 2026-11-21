@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import GDL_PYTHON, PROFILES, ROOT, STATE_ROOT, GdlError, Instance, Settings, port_open
-from .render import build_root, gdl_env, image, write_fragment
+from .render import NETWORK, build_root, gdl_env, image, service_url, service_urls, write_fragment
 
 Out = Callable[[str], None]
 WIN = sys.platform == "win32"
@@ -196,14 +196,26 @@ class Container(Backend):
     def rt(self) -> str:
         return detect_runtime()[0]
 
+    @property
+    def template(self):
+        from .templates import get
+        return get(self.inst.template)
+
     def compose(self, *args: str, inst: Instance | None = None) -> tuple[list[str], dict]:
+        """A workbench is compose.yml + its fragment; a service is its fragment alone."""
         inst = inst or self.inst
-        frag = write_fragment(inst)
+        frag = write_fragment(inst, None if inst.is_service else service_urls(self.settings, internal=True))
         env = {**os.environ, "PROFILE": inst.profile, "GDL_TAG": inst.image_tag or "latest",
                "GDL_PORT": str(inst.port), "GDL_MODE": inst.mode}
-        argv = [*detect_runtime()[1], "-p", inst.container_name,
-                "-f", str(ROOT / "compose.yml"), "-f", str(frag), *args]
+        files = [] if inst.is_service else ["-f", str(ROOT / "compose.yml")]
+        argv = [*detect_runtime()[1], "-p", inst.container_name, *files, "-f", str(frag), *args]
         return argv, env
+
+    def ensure_network(self, out: Out = lambda _: None) -> None:
+        """The shared network every geodatalab container joins (Docker or Podman)."""
+        if subprocess.run([self.rt, "network", "inspect", NETWORK], capture_output=True).returncode:
+            run([self.rt, "network", "create", NETWORK], out)
+            out(f"Created network '{NETWORK}' (instances reach each other by name).")
 
     def _run_compose(self, out: Out, *args: str, inst: Instance | None = None) -> None:
         argv, env = self.compose(*args, inst=inst)
@@ -234,9 +246,23 @@ class Container(Backend):
             return False
 
     def health(self) -> str:
-        return self._inspect("{{.State.Health.Status}}") if self.is_running() else ""
+        """healthy | unhealthy | starting | "" (running, but no health check)."""
+        if not self.is_running():
+            return ""
+        status = self._inspect("{{.State.Health.Status}}")
+        if self.rt == "podman" and status == "starting":
+            # Podman runs health checks from systemd timers; without systemd they
+            # never run on their own, so run one now (it also updates the status).
+            ok = subprocess.run(["podman", "healthcheck", "run", self.inst.container_name],
+                                capture_output=True).returncode == 0
+            status = "healthy" if ok else status
+        return status
 
     def build(self, out, profile=None, no_cache=False):
+        if self.inst.is_service:  # nothing to build: fetch the image
+            out(f"Pulling {self.inst.image} ...")
+            self._run_compose(out, "pull")
+            return
         profile = profile or self.inst.profile
         tag = f"{date.today():%Y.%m}-{profile}"
         if not (ROOT / "requirements" / "locks" / f"{profile}.lock").exists():
@@ -251,6 +277,8 @@ class Container(Backend):
         out(f"Build complete: geodatalab:{tag}")
 
     def lock(self, out, profiles):
+        if self.inst.is_service:
+            raise GdlError("A service has nothing to lock. Update (u) pulls a newer image.")
         m = platform.machine().lower()  # x86_64 / aarch64 / arm64 (macOS) / amd64 (Windows)
         plat = f"{ {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(m, m)}-manylinux_2_28"
         (ROOT / "requirements" / "locks").mkdir(parents=True, exist_ok=True)
@@ -270,7 +298,8 @@ class Container(Backend):
             out(f"Wrote requirements/locks/{p}.lock — rebuild to apply.")
 
     def start(self, out):
-        ensure_workspace(self.inst, out)
+        if not self.inst.is_service:
+            ensure_workspace(self.inst, out)
         if self.is_running():
             out("Already running.")
             return
@@ -278,6 +307,14 @@ class Container(Backend):
         missing = [d for d in self.inst.data if not Path(d.path).is_dir()]
         if missing:
             raise GdlError("Data folder(s) missing: " + ", ".join(f"{d.name} ({d.path})" for d in missing))
+        self.ensure_network(out)
+        if self.inst.is_service:
+            out(f"Starting [{self.inst.image}, port {self.inst.port}] ...")
+            self._run_compose(out, "up", "-d")  # pulls the image if needed
+            self._wait(out)
+            out(f"From this machine:  {service_url(self.inst)}")
+            out(f"From containers:    {service_url(self.inst, internal=True)}")
+            return
         img = image(self.inst)
         if not capture([self.rt, "image", "inspect", "-f", "{{.Id}}", img]):
             if self.inst.image_tag and capture([self.rt, "image", "inspect", "-f", "{{.Id}}", "geodatalab:latest"]):
@@ -290,9 +327,10 @@ class Container(Backend):
         self._wait(out)
 
     def _wait(self, out):
-        for _ in range(30):
-            h = self.health() if self.inst.mode != "idle" else ("healthy" if self.is_running() else "")
-            if h == "healthy":
+        checked = (self.template.health if self.inst.is_service else self.inst.mode != "idle")
+        for _ in range(45):
+            h = self.health() if checked else ("healthy" if self.is_running() else "")
+            if h == "healthy" or (h == "" and self.is_running() and not checked):
                 out("Ready.")
                 return
             if h == "unhealthy":
@@ -316,10 +354,27 @@ class Container(Backend):
     def shell(self):
         if not self.is_running():
             raise GdlError("Not running. Start it first.")
-        return [self.rt, "exec", "-it", self.inst.container_name, "bash"], None, ROOT
+        if self.inst.is_service:
+            t = self.template
+            cmd = [t.fill(a, self.inst.env) for a in t.shell]
+        else:
+            cmd = ["bash"]
+        return [self.rt, "exec", "-it", self.inst.container_name, *cmd], None, ROOT
+
+    def url(self):
+        return service_url(self.inst) if self.inst.is_service else super().url()
+
+    def update(self, out):
+        if not self.inst.is_service:
+            return super().update(out)
+        self.build(out)  # pull
+        if self.is_running():
+            self.ensure_network(out)
+            self._run_compose(out, "up", "-d")  # recreate on the new image, data volume kept
+            self._wait(out)
 
     def token(self):
-        if not self.is_running():
+        if not self.is_running() or self.inst.is_service:
             return ""
         logs = subprocess.run([self.rt, "logs", self.inst.container_name], capture_output=True,
                               text=True, errors="replace")
@@ -335,6 +390,12 @@ class Container(Backend):
         lines = [f"Runtime:  {rt} ({' '.join(comp)})", f"Image:    {image(self.inst)}"]
         if self.is_running():
             lines.append(f"Started:  {self._inspect('{{.State.StartedAt}}')}")
+        if self.inst.is_service:
+            t = self.template
+            lines += [f"Network:  {NETWORK}  (other containers: {service_url(self.inst, internal=True)})"]
+            if t.volume:
+                lines.append(f"Volume:   {self.inst.container_name}-data → {t.volume}")
+            return lines
         return lines + ["Images:", *(f"  {i}" for i in self.images() or ["none built yet"])]
 
     def clean(self, out, images=False):
@@ -508,7 +569,7 @@ class Pixi(Backend):
         if self.inst.open and (root / self.inst.open).is_dir():
             args.append(f"--ContentsManager.preferred_dir={self.inst.open}")
         out(f"Starting [instance {self.inst.name}, env {self.inst.env_name}, port {self.inst.port}] ...")
-        env = self.clean_env(gdl_env(self.inst, str(root)))
+        env = self.clean_env(gdl_env(self.inst, str(root), service_urls(self.settings, internal=False)))
         pid = spawn_detached(self._in_env(self.inst, *args), env, root / "workspace", self._f("jupyter.log"))
         self._f("jupyter.pid").write_text(str(pid))
         for _ in range(120):
@@ -538,7 +599,8 @@ class Pixi(Backend):
         ensure_workspace(self.inst, lambda _: None)
         root, _ = build_root(self.inst)
         return (self.px("shell", "--frozen", "-e", self.inst.env_name),
-                self.clean_env(gdl_env(self.inst, str(root))), root / "workspace")
+                self.clean_env(gdl_env(self.inst, str(root), service_urls(self.settings, internal=False))),
+                root / "workspace")
 
     def token(self):
         tf = self._f("token")

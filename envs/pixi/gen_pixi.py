@@ -58,6 +58,7 @@ TASKS = {
 RENAME = {
     "pdal": "python-pdal",
     "matplotlib": "matplotlib-base",  # headless: skip the Qt/PySide6 GUI backend
+    "psycopg2-binary": "psycopg2",    # conda-forge builds it against its own libpq
 }
 # Not on conda-forge: installed from PyPI by pixi (uv) inside the env
 PYPI_ONLY = {

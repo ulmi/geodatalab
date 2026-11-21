@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import shlex
 import socket
 import tomllib
@@ -49,8 +50,14 @@ class DataDir:
 
 @dataclass
 class Instance:
-    """One fully resolved workbench (default + overrides)."""
+    """One fully resolved instance (default + overrides): a Jupyter workbench,
+    or a service container made from a template (kind = "service")."""
     name: str = "default"
+    kind: str = "workbench"        # workbench | service
+    template: str = ""             # service: templates/<template>.toml
+    image: str = ""                # service: the image to run
+    shm_size: str = ""             # container /dev/shm size, e.g. 2g
+    env: dict[str, str] = field(default_factory=dict)   # extra container environment
     backend: str = "container"
     profile: str = "lab"
     mode: str = "lab"
@@ -62,6 +69,10 @@ class Instance:
     memory_reserve: str = ""
     cpus: str = ""
     data: list[DataDir] = field(default_factory=list)
+
+    @property
+    def is_service(self) -> bool:
+        return self.kind == "service"
 
     @property
     def container_name(self) -> str:
@@ -108,7 +119,9 @@ class Settings:
             others = ", ".join(self.names()) or "none"
             raise GdlError(f"No instance '{name}' (instances: {others}).")
         inst = self._resolve(name)
-        if os.environ.get("GDL_BACKEND"):  # one-off override, never saved
+        if inst.is_service:
+            inst.backend = "container"  # services are always containers
+        elif os.environ.get("GDL_BACKEND"):  # one-off override, never saved
             inst.backend = os.environ["GDL_BACKEND"]
         if inst.backend not in BACKENDS:
             raise GdlError(f"Unknown backend '{inst.backend}' (valid: {', '.join(BACKENDS)})")
@@ -139,7 +152,7 @@ class Settings:
     def _store(self, inst: Instance) -> None:
         values = {k: _plain(getattr(inst, k)) for k in KEYS}
         if inst.name == "default":
-            self.base = {k: v for k, v in values.items() if v not in ("", [])}
+            self.base = {k: v for k, v in values.items() if v not in ("", [], {})}
             return
         base = self._resolve("default")
         self.instances[inst.name] = {
@@ -147,15 +160,32 @@ class Settings:
             if k == "port" or v != _plain(getattr(base, k))
         }
 
-    def new_instance(self, name: str) -> Instance:
+    def new_instance(self, name: str, template: str = "", variant: str = "") -> Instance:
+        """A new workbench, or a service made from `template` (image `variant`)."""
         if not INSTANCE_RE.match(name):
             raise GdlError("Instance names: lowercase letters, digits and '-'.")
         if name in self.names():
             raise GdlError(f"Instance '{name}' already exists.")
-        if name == "default":  # recreating a deleted default instance
-            self.base = {"port": self.free_port(exclude=name)}
-        else:
-            self.instances[name] = {"port": self.free_port(exclude=name)}
+        inst = self._resolve(name) if name != "default" else Instance()
+        inst.name = name
+        if template:
+            from .templates import get as get_template
+            t = get_template(template)
+            if variant and variant not in t.images:
+                raise GdlError(f"Template '{template}' has no image variant '{variant}'.")
+            inst.kind, inst.template, inst.backend = "service", template, "container"
+            inst.image = t.images[variant or next(iter(t.images))]
+            inst.shm_size = t.shm_size
+            inst.env = {**t.env, **{k: secrets.token_urlsafe(18) for k in t.secrets}}
+            inst.port = self.free_port(exclude=name, start=t.port)
+        else:  # a workbench, even if the default instance is a service
+            inst.kind, inst.template, inst.image, inst.env = "workbench", "", "", {}
+            if inst.backend not in BACKENDS:
+                inst.backend = "container"
+            inst.port = self.free_port(exclude=name)
+        if name == "default":
+            self.base = {}
+        self._store(inst)
         self.save()
         return self.get(name)
 
@@ -173,9 +203,9 @@ class Settings:
             self.instances.pop(name, None)
         self.save()
 
-    def free_port(self, exclude: str = "") -> int:
+    def free_port(self, exclude: str = "", start: int = 8888) -> int:
         used = {self.get(n).port for n in self.names() if n != exclude}
-        p = 8888
+        p = start
         while p in used or port_open(p):
             p += 1
         return p

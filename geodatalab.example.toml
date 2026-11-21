@@ -23,3 +23,16 @@ ro = true                         # enforced on the container backend only
 [instance.pinhel]
 port = 8890
 profile = "kitchen"
+
+[instance.gisdb]                  # a service (press n → PostGIS in the manager)
+kind = "service"
+template = "postgis"              # templates/postgis.toml
+image = "docker.io/postgis/postgis:17-3.5-alpine"
+backend = "container"
+port = 5432                       # host port, bound to 127.0.0.1
+shm_size = "2g"
+
+[instance.gisdb.env]
+POSTGRES_USER = "gis"
+POSTGRES_DB = "gis"
+POSTGRES_PASSWORD = "generated-per-instance"

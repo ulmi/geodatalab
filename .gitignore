@@ -4,6 +4,9 @@
 geodatalab.toml
 *.bak
 
+# Your own service templates
+templates.d/
+
 # Generated state / environments
 .gdl/
 .pixi/

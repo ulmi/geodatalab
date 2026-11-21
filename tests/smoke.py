@@ -25,7 +25,7 @@ GIS = [
     "ipykernel", "folium", "ipyleaflet", "matplotlib", "matplotlib_scalebar",
     "rasterstats", "seaborn", "bokeh", "dask", "scipy", "sqlalchemy", "duckdb",
     "sklearn", "skimage", "xrspatial", "libpysal", "esda", "mgwr", "momepy",
-    "whitebox", "whitebox_workflows", "pdal",
+    "whitebox", "whitebox_workflows", "pdal", "psycopg2", "geoalchemy2",
 ]
 REQUIRED = {
     "kitchen": GIS,

@@ -89,6 +89,28 @@ A `.geodatalab` file from the old `geodatalab.sh` is converted automatically on 
 
 **Remote workbench:** clone it on the server, then `ssh box 'cd geodatalab && pixi run start'` and `ssh -L 8888:localhost:8888 box`.
 
+## Services: PostGIS and friends
+
+Next to workbenches, the manager runs ready-made **service containers** from templates in [`templates/`](templates/). Press **n**, pick a type (for example **PostGIS**) and an image variant (Debian or Alpine). Then press **s** to start it.
+
+- Every container joins the `geodatalab` network, where instances reach each other **by name**: `postgresql://gis:…@gisdb:5432/gis`.
+- Services publish their port on `127.0.0.1`, so pixi workbenches, QGIS and other desktop apps use `localhost:<port>`.
+- Every workbench gets each service's address as `GDL_SERVICE_<NAME>`, already right for where it runs:
+
+```python
+import os, geopandas as gpd
+from sqlalchemy import create_engine
+eng = create_engine(os.environ["GDL_SERVICE_GISDB"])
+gdf.to_postgis("parcels", eng)            # psycopg2 + GeoAlchemy2 are in every GIS profile
+```
+
+- **Settings** sets the image, port, environment and `shm_size` (PostGIS starts with 1 GB instead of Docker's 64 MB). The password is generated per instance.
+- Data lives in a named volume (`geodatalab-<name>-data`). Deleting the instance keeps it; **Clean** (`k`) removes it.
+- **Shell** (`h`) opens `psql`. **Update** (`u`) pulls a newer image.
+- Works with Docker and Podman. Your own templates go in `templates.d/`, which isn't committed.
+
+Workbenches also get `shm_size` in Settings (useful for Dask).
+
 ## Workspace & data folders
 
 Every backend shows the folders in the same place:

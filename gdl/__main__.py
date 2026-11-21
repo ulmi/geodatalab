@@ -15,7 +15,7 @@ import threading
 import webbrowser
 
 from .config import PROFILES, GdlError, Settings, migrate_legacy
-from .render import write_fragment
+from .render import service_urls, write_fragment
 
 COMMANDS = ["start", "stop", "restart", "status", "url", "open", "logs", "shell",
             "update", "build", "lock", "clean", "render"]
@@ -56,11 +56,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run(a: argparse.Namespace) -> int:
-    from .backends import backend_for
+    from .backends import Container, backend_for
     settings = Settings()
     inst = settings.get(a.instance)
-    if a.command == "render":
-        say(f"Rendered {write_fragment(inst)}")
+    if a.command == "render":  # also used by .devcontainer's initializeCommand
+        say(f"Rendered {write_fragment(inst, service_urls(settings, internal=True))}")
+        try:  # the fragment joins the shared network: make sure it exists
+            Container(settings, inst).ensure_network()
+        except GdlError:
+            pass  # no container runtime here
         return 0
     if not settings.exists:
         raise GdlError("No geodatalab.toml yet. Run `pixi run gdl` to set up, "
@@ -84,16 +88,22 @@ def run(a: argparse.Namespace) -> int:
             webbrowser.open(be.url())
         case "status":
             state = "running" if be.is_running() else "stopped"
-            for k, v in [("Instance", inst.name), ("Backend", f"{inst.backend} ({be.label()})"),
-                         ("Profile", inst.profile), ("Mode", inst.mode), ("Port", inst.port),
-                         ("Workspace", inst.workspace or "not set"),
-                         ("State", f"{state} {be.health()}".strip())]:
+            if inst.is_service:
+                rows = [("Instance", inst.name), ("Service", f"{inst.template} ({inst.image})"),
+                        ("Port", inst.port), ("State", f"{state} {be.health()}".strip()),
+                        ("Address", be.url())]
+            else:
+                rows = [("Instance", inst.name), ("Backend", f"{inst.backend} ({be.label()})"),
+                        ("Profile", inst.profile), ("Mode", inst.mode), ("Port", inst.port),
+                        ("Workspace", inst.workspace or "not set"),
+                        ("State", f"{state} {be.health()}".strip())]
+            for k, v in rows:
                 print(f"{k + ':':11}{v}")
             for d in inst.data:
                 print(f"{'Data:':11}{d.name} -> {d.path}{'  (ro)' if d.ro else ''}")
             for line in be.status():
                 print(line)
-            if state == "running" and inst.mode != "idle":
+            if state == "running" and inst.mode != "idle" and not inst.is_service:
                 say(be.url(), "34")
         case "logs":
             be.logs(out, threading.Event())

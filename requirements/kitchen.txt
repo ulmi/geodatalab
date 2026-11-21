@@ -17,6 +17,9 @@ dask
 scipy
 SQLAlchemy
 duckdb
+# PostGIS from notebooks (GDL_SERVICE_<NAME> URLs): driver + GeoDataFrame.to_postgis
+psycopg2-binary
+GeoAlchemy2
 # analysis / ML
 scikit-learn
 scikit-image

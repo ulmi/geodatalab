@@ -67,6 +67,13 @@ services:
           cpus: "6"
         reservations:
           memory: "4G"
+    networks:
+      default:
+        aliases: ["default"]
+networks:
+  default:
+    name: "geodatalab"
+    external: true
 """
 
 
@@ -200,6 +207,67 @@ class TestRender(Base):
             render.build_root(i)
 
 
+class TestServices(Base):
+    def setUp(self):
+        super().setUp()
+        self.s = Settings(self.toml)
+        self.s.update(config.Instance(), workspace="/w", backend="pixi")
+
+    def test_template_loads(self):
+        from gdl import templates
+        t = templates.get("postgis")
+        self.assertEqual((t.port, list(t.images)), (5432, ["debian", "alpine"]))
+        with self.assertRaises(GdlError):
+            templates.get("nope")
+
+    def test_new_service(self):
+        db = self.s.new_instance("gisdb", "postgis")
+        self.assertTrue(db.is_service)
+        self.assertEqual((db.backend, db.port, db.shm_size), ("container", 5432, "1g"))
+        self.assertEqual(db.env["POSTGRES_USER"], "gis")
+        self.assertGreater(len(db.env["POSTGRES_PASSWORD"]), 16)
+        self.assertEqual(self.s.new_instance("db2", "postgis").port, 5433)  # next free
+        alpine = self.s.new_instance("db3", "postgis", "alpine")
+        self.assertTrue(alpine.image.endswith("-alpine"))
+        with mock.patch.dict(os.environ, {"GDL_BACKEND": "pixi"}):
+            self.assertEqual(Settings(self.toml).get("gisdb").backend, "container")
+        with self.assertRaises(GdlError):
+            self.s.new_instance("db4", "postgis", "nope")
+
+    def test_workbench_after_service_default(self):
+        self.s.remove_instance("default")
+        self.s.new_instance("default", "postgis")
+        wb = self.s.new_instance("wb")
+        self.assertFalse(wb.is_service)
+        self.assertEqual((wb.env, wb.image, wb.port), ({}, "", 8888))
+
+    def test_service_fragment(self):
+        db = self.s.new_instance("gisdb", "postgis")
+        db = self.s.update(db, env={**db.env, "POSTGRES_PASSWORD": "pa$$"})
+        f = render.compose_fragment(db)
+        for want in ['image: "docker.io/postgis/postgis:17-3.5"', 'container_name: "geodatalab-gisdb"',
+                     '- "127.0.0.1:5432:5432"', 'shm_size: "1g"', 'aliases: ["gisdb"]',
+                     'test: ["CMD-SHELL", "pg_isready -U gis -d gis"]',
+                     'name: "geodatalab-gisdb-data"', 'target: "/var/lib/postgresql/data"',
+                     '- "POSTGRES_PASSWORD=pa$$$$"',  # $ escaped for compose
+                     'name: "geodatalab"', "external: true"]:
+            self.assertIn(want, f)
+        self.assertNotIn("GDL_MODE", f)
+
+    def test_connections(self):
+        db = self.s.new_instance("gisdb", "postgis")
+        pw = db.env["POSTGRES_PASSWORD"]
+        self.assertEqual(render.service_url(db), f"postgresql://gis:{pw}@localhost:5432/gis")
+        self.assertEqual(render.service_url(db, internal=True), f"postgresql://gis:{pw}@gisdb:5432/gis")
+        # container workbench: internal address in its compose fragment
+        wb = self.s.get()
+        frag = render.compose_fragment(wb, render.service_urls(self.s, internal=True))
+        self.assertIn(f'"GDL_SERVICE_GISDB=postgresql://gis:{pw}@gisdb:5432/gis"', frag)
+        # pixi workbench: localhost address in its environment
+        env = render.gdl_env(wb, "/root", render.service_urls(self.s, internal=False))
+        self.assertEqual(env["GDL_SERVICE_GISDB"], f"postgresql://gis:{pw}@localhost:5432/gis")
+
+
 class TestPixiPlatform(Base):
     def test_profile_platforms(self):
         from gdl.backends import Pixi
@@ -236,8 +304,22 @@ class TestTui(Base):
                 await pilot.pause()
                 self.assertEqual(app.current, "pinhel")
                 self.assertIn("pinhel", Settings(self.toml).instances)
+                # a PostGIS service through the same dialog
+                from textual.widgets import Select
+                await pilot.press("n")
+                await pilot.pause()
+                for ch in "gisdb":
+                    await pilot.press(ch)
+                app.screen.query_one("#type", Select).value = "postgis"
+                await pilot.pause()
+                app.screen.query_one("#variant", Select).value = "alpine"
+                await pilot.click("#ok")
+                await pilot.pause()
+                db = Settings(self.toml).get("gisdb")
+                self.assertTrue(db.is_service and db.image.endswith("-alpine"))
+                self.assertEqual(app.current, "gisdb")
                 # delete every instance, default included
-                for name in ("pinhel", "default"):
+                for name in ("gisdb", "pinhel", "default"):
                     app.current = name
                     await pilot.press("d")
                     await pilot.pause()

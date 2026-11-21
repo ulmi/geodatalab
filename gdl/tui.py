@@ -18,7 +18,8 @@ from textual.widgets import (Button, Checkbox, DataTable, Footer, Header, Input,
 from .backends import Backend, backend_for
 from .config import (BACKENDS, MODES, PROFILES, DataDir, GdlError, Instance, Settings,
                      check_data_name)
-from .render import remove_state
+from .render import NETWORK, remove_state, service_url
+from .templates import load as load_templates
 
 
 def logo() -> ComposeResult:
@@ -91,6 +92,66 @@ class Setup(ModalScreen):
                       "workspace": str(Path(self.query_one("#workspace", Input).value).expanduser())})
 
 
+class NewInstance(ModalScreen):
+    """Name + type: a workbench, or a service from a template (with its image variant)."""
+    WORKBENCH = "workbench"
+
+    def __init__(self):
+        super().__init__()
+        self.templates = load_templates()
+
+    def compose(self) -> ComposeResult:
+        types = [("Workbench  —  JupyterLab + GIS stack (pixi or container)", self.WORKBENCH)]
+        types += [(f"{t.name}  —  {t.description}", k) for k, t in self.templates.items()]
+        with Vertical(id="dialog"):
+            yield Label("[b]New instance[/b]")
+            yield Label("Name")
+            yield Input(placeholder="lowercase letters, digits, -", id="name")
+            yield Label("Type")
+            yield Select(types, value=self.WORKBENCH, allow_blank=False, id="type")
+            yield Label("Image", id="variant-label")
+            yield Select([("-", "-")], allow_blank=False, id="variant")
+            with Horizontal(classes="buttons"):
+                yield Button("Create", variant="primary", id="ok")
+                yield Button("Cancel", id="cancel")
+            yield Static(Text(f"Services join the '{NETWORK}' network: other containers reach them by "
+                              "instance name, pixi workbenches through localhost. Every workbench gets "
+                              "their addresses as GDL_SERVICE_<NAME>."), classes="hint")
+
+    def on_mount(self) -> None:
+        self.show_variants(self.WORKBENCH)
+
+    @on(Select.Changed, "#type")
+    def type_changed(self, event: Select.Changed) -> None:
+        self.show_variants(event.value)
+
+    def show_variants(self, key) -> None:
+        t = self.templates.get(key)
+        variants = list(t.images.items()) if t else []
+        sel = self.query_one("#variant", Select)
+        if variants:
+            sel.set_options([(f"{v}  —  {img}", v) for v, img in variants])
+            sel.value = variants[0][0]
+        for w in (sel, self.query_one("#variant-label")):
+            w.display = len(variants) > 1
+
+    @on(Button.Pressed, "#cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#ok")
+    @on(Input.Submitted, "#name")
+    def create(self) -> None:
+        name = self.query_one("#name", Input).value.strip()
+        key = self.query_one("#type", Select).value
+        if not name:
+            self.notify("Enter a name.", severity="error")
+            return
+        template = "" if key == self.WORKBENCH else key
+        variant = self.query_one("#variant", Select).value if template else ""
+        self.dismiss((name, template, variant if variant != "-" else ""))
+
+
 class GeodatalabApp(App):
     TITLE = "geodatalab"
     CSS = """
@@ -112,7 +173,7 @@ class GeodatalabApp(App):
     #data-add Checkbox, #data-add Button { width: auto; }
     #data { height: 1fr; }
     #dialog { width: 72; height: auto; max-height: 100%; overflow-y: auto; padding: 1 2; border: thick $primary; background: $surface; }
-    Ask, Setup { align: center middle; }
+    Ask, Setup, NewInstance { align: center middle; }
     """
     BINDINGS = [
         Binding("s", "start", "Start"), Binding("x", "stop", "Stop"), Binding("r", "restart", "Restart"),
@@ -146,13 +207,24 @@ class GeodatalabApp(App):
                             yield Button(name.capitalize() if name != "copy" else "Copy URL", id=f"do-{name}")
                 with TabPane("Settings", id="tab-settings"):
                     with Grid(id="form"):
-                        yield Label("Backend");   yield Select(options(BACKENDS), allow_blank=False, id="f-backend")
-                        yield Label("Profile");   yield Select(options(PROFILES), allow_blank=False, id="f-profile")
-                        yield Label("Mode");      yield Select(options(MODES), allow_blank=False, id="f-mode")
+                        # class "wb": workbenches only, "svc": services only
+                        yield Label("Backend", classes="wb")
+                        yield Select(options(BACKENDS), allow_blank=False, id="f-backend", classes="wb")
+                        yield Label("Profile", classes="wb")
+                        yield Select(options(PROFILES), allow_blank=False, id="f-profile", classes="wb")
+                        yield Label("Mode", classes="wb")
+                        yield Select(options(MODES), allow_blank=False, id="f-mode", classes="wb")
+                        yield Label("Image", classes="svc")
+                        yield Input(id="f-image", classes="svc", placeholder="e.g. docker.io/postgis/postgis:17-3.5-alpine")
                         yield Label("Port");      yield Input(id="f-port", type="integer")
-                        yield Label("Workspace"); yield Input(id="f-workspace")
-                        yield Label("Opens in");  yield Input(id="f-open", placeholder="workspace, data/<name> or empty")
-                        yield Label("Image tag"); yield Input(id="f-image_tag", placeholder="container: latest")
+                        yield Label("Environment", classes="svc")
+                        yield Input(id="f-env", classes="svc", placeholder="KEY=value; KEY2=value")
+                        yield Label("Workspace", classes="wb"); yield Input(id="f-workspace", classes="wb")
+                        yield Label("Opens in", classes="wb")
+                        yield Input(id="f-open", classes="wb", placeholder="workspace, data/<name> or empty")
+                        yield Label("Image tag", classes="wb")
+                        yield Input(id="f-image_tag", classes="wb", placeholder="container: latest")
+                        yield Label("Shared mem."); yield Input(id="f-shm_size", placeholder="container /dev/shm, e.g. 2g")
                         yield Label("Memory");    yield Input(id="f-memory", placeholder="container limit, e.g. 16G")
                         yield Label("Memory res."); yield Input(id="f-memory_reserve", placeholder="e.g. 4G")
                         yield Label("CPUs");      yield Input(id="f-cpus", placeholder="e.g. 6")
@@ -174,7 +246,7 @@ class GeodatalabApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.columns = self.query_one("#instances", DataTable).add_columns("Instance", "Backend", "Port", "State")
+        self.columns = self.query_one("#instances", DataTable).add_columns("Instance", "Kind", "Port", "State")
         self.query_one("#data", DataTable).add_columns("Name", "Read-only", "Path")
         self.query_one("#instances", DataTable).focus()
         if not self.settings.exists or not self.settings.names():  # first run, or all deleted
@@ -209,10 +281,13 @@ class GeodatalabApp(App):
             inst = self.settings.get(n)
             be = backend_for(self.settings, inst)
             running = be.is_running()
-            rows.append((n, inst.backend, str(inst.port), (be.health() or "running") if running else "stopped"))
-        url, be = "", self.backend()
+            kind = inst.template if inst.is_service else inst.backend
+            rows.append((n, kind, str(inst.port), (be.health() or "running") if running else "stopped"))
+        url, be, i = "", self.backend(), self.inst
         try:
-            if be.is_running() and self.inst.mode != "idle":
+            if i.is_service:  # connection info is useful even while stopped
+                url = f"{be.url()}\n{service_url(i, internal=True)}"
+            elif be.is_running() and i.mode != "idle":
                 url = be.url()
             extra = be.status()
         except GdlError as e:
@@ -240,11 +315,19 @@ class GeodatalabApp(App):
         i = self.inst
         state = dict((r[0], r[3]) for r in rows).get(self.current, "?")
         # Text objects, not markup: paths and URLs may contain [ ] characters
-        lines = [Text.assemble((i.name, "bold"), f"   {i.backend} · {i.profile} · mode {i.mode} · port {i.port}"),
-                 Text.assemble("State:      ", (state, colours.get(state, "yellow"))),
-                 Text.assemble("URL:        ", (url, f"link {url}") if url else "—"),
-                 Text.assemble("Workspace:  ", i.workspace or ("not set", "red")),
-                 *(Text(f"Data:       {d.name} → {d.path}{'  (ro)' if d.ro else ''}") for d in i.data)]
+        if i.is_service:
+            local, internal = (url.split("\n") + [""])[:2]
+            lines = [Text.assemble((i.name, "bold"), f"   {i.template} · {i.image} · port {i.port}"),
+                     Text.assemble("State:      ", (state, colours.get(state, "yellow"))),
+                     Text.assemble("This machine: ", (local, "bold"), "   (pixi workbenches, desktop apps)"),
+                     Text.assemble("Containers:   ", (internal, "bold"), "   (container workbenches)"),
+                     Text(f"In notebooks: os.environ['GDL_SERVICE_{i.name.upper().replace('-', '_')}']")]
+        else:
+            lines = [Text.assemble((i.name, "bold"), f"   {i.backend} · {i.profile} · mode {i.mode} · port {i.port}"),
+                     Text.assemble("State:      ", (state, colours.get(state, "yellow"))),
+                     Text.assemble("URL:        ", (url, f"link {url}") if url else "—"),
+                     Text.assemble("Workspace:  ", i.workspace or ("not set", "red"))]
+        lines += [Text(f"Data:       {d.name} → {d.path}{'  (ro)' if d.ro else ''}") for d in i.data]
         if extra:
             lines += [Text(""), *map(Text, extra)]
         self.query_one("#overview", Static).update(Text("\n").join(lines))
@@ -253,10 +336,15 @@ class GeodatalabApp(App):
         if self.current not in self.settings.names():
             return
         i = self.inst
+        for w in self.query(".wb"):
+            w.display = not i.is_service
+        for w in self.query(".svc"):
+            w.display = i.is_service
         for key in ("backend", "profile", "mode"):
             self.query_one(f"#f-{key}", Select).value = getattr(i, key)
-        for key in ("port", "workspace", "open", "image_tag", "memory", "memory_reserve", "cpus"):
+        for key in ("port", "workspace", "open", "image_tag", "image", "shm_size", "memory", "memory_reserve", "cpus"):
             self.query_one(f"#f-{key}", Input).value = str(getattr(i, key))
+        self.query_one("#f-env", Input).value = "; ".join(f"{k}={v}" for k, v in i.env.items())
         table = self.query_one("#data", DataTable)
         table.clear()
         for d in i.data:
@@ -300,7 +388,11 @@ class GeodatalabApp(App):
                          lambda ok: ok and self.op("Update", "update"))
 
     def action_clean(self) -> None:
-        what = "container" if self.inst.backend == "container" else f"pixi env '{self.inst.env_name}'"
+        i = self.inst
+        if i.is_service:
+            what = f"container and its data volume ({i.container_name}-data — all data in it)"
+        else:
+            what = "container" if i.backend == "container" else f"pixi env '{i.env_name}'"
         self.push_screen(Ask(f"Remove the {what} of instance '{self.current}'?"),
                          lambda ok: ok and self.op("Clean", "clean"))
 
@@ -318,15 +410,18 @@ class GeodatalabApp(App):
     @work(thread=True, group="url")
     def action_open(self) -> None:
         be = self.backend()
-        if be.is_running():
-            webbrowser.open(be.url())
-        else:
+        if not be.is_running():
             self.call_from_thread(self.notify, "Not running.", severity="warning")
+        elif not be.url().startswith("http"):
+            self.call_from_thread(self.notify, "Not a web page. Copy its address (c) into your "
+                                  "client or notebook.", severity="warning")
+        else:
+            webbrowser.open(be.url())
 
     @work(thread=True, group="url")
     def action_copy(self) -> None:
         be = self.backend()
-        if not be.is_running():
+        if not (self.inst.is_service or be.is_running()):  # a service's address is known up front
             self.call_from_thread(self.notify, "Not running.", severity="warning")
             return
         url = be.url()
@@ -364,23 +459,28 @@ class GeodatalabApp(App):
     # ── instances ──────────────────────────────────────────────────────────────
 
     def action_new(self) -> None:
-        def create(name):
-            if not name:
+        def create(answer):
+            if not answer:
                 return
+            name, template, variant = answer
             try:
-                self.current = self.settings.new_instance(name).name
-                self.notify(f"Created '{name}' on port {self.inst.port}. Adjust it in Settings.")
+                inst = self.settings.new_instance(name, template, variant)
+                self.current = inst.name
+                what = f"{inst.template} service" if inst.is_service else "workbench"
+                self.notify(f"Created {what} '{name}' on port {inst.port}. Start it with s.")
                 self.show_instance()
                 self.refresh_states()
             except GdlError as e:
                 self.notify(str(e), severity="error")
-        self.push_screen(Ask("New instance name", field="lowercase letters, digits, -"), create)
+        self.push_screen(NewInstance(), create)
 
     def action_delete(self) -> None:
         name = self.current
         if name not in self.settings.names():
             return
         extra = " The other instances keep their current settings." if name == "default" else ""
+        if self.inst.is_service:
+            extra += f" Its data volume {self.inst.container_name}-data is kept (Clean, k, removes it)."
         self.push_screen(Ask(f"Delete instance '{name}'? Its config and generated state go; "
                              f"workspace and data folders are untouched.{extra}"),
                          lambda ok: ok and self.delete(name))
@@ -413,9 +513,19 @@ class GeodatalabApp(App):
     @on(Button.Pressed, "#save")
     def save(self) -> None:
         i = self.inst
-        values = {k: self.query_one(f"#f-{k}", Select).value for k in ("backend", "profile", "mode")}
-        values |= {k: self.query_one(f"#f-{k}", Input).value.strip()
-                   for k in ("workspace", "open", "image_tag", "memory", "memory_reserve", "cpus")}
+        common = ("shm_size", "memory", "memory_reserve", "cpus")
+        if i.is_service:
+            values = {k: self.query_one(f"#f-{k}", Input).value.strip() for k in ("image", *common)}
+            env = {}
+            for pair in self.query_one("#f-env", Input).value.split(";"):
+                k, sep, v = pair.strip().partition("=")
+                if k and sep:
+                    env[k.strip()] = v.strip()
+            values["env"], values["backend"], values["workspace"] = env, i.backend, i.workspace
+        else:
+            values = {k: self.query_one(f"#f-{k}", Select).value for k in ("backend", "profile", "mode")}
+            values |= {k: self.query_one(f"#f-{k}", Input).value.strip()
+                       for k in ("workspace", "open", "image_tag", *common)}
         try:
             values["port"] = int(self.query_one("#f-port", Input).value)
         except ValueError:
