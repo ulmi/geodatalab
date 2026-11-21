@@ -33,6 +33,8 @@ pixi run gdl          # opens the manager
 
 The manager opens on an empty list. Press **n** (or **New instance…**) to start the wizard. Step 1 asks for a name and a type: a **workbench** (JupyterLab + GIS stack) or a **service** from a template, such as PostGIS. Step 2 asks what that type needs: backend, profile and workspace folder for a workbench, or the image for a service. The settings go to `geodatalab.toml`. Then press **b** to build a workbench and **s** to start.
 
+![The manager on first run](images/tui1.png)
+
 ## The manager
 
 ```
@@ -96,6 +98,8 @@ A `.geodatalab` file from the old `geodatalab.sh` is converted automatically on 
 ## Services: PostGIS and friends
 
 Next to workbenches, the manager runs ready-made **service containers** from templates in [`templates/`](templates/). Press **n**, pick a type (for example **PostGIS**) and an image variant (Debian or Alpine). Then press **s** to start it.
+
+![Step 2 of the wizard for a PostGIS service](images/tui2.png)
 
 - Every container joins the `geodatalab` network, where instances reach each other **by name**: `postgresql://gis:…@gisdb:5432/gis`.
 - Services publish their port on `127.0.0.1`, so pixi workbenches, QGIS and other desktop apps use `localhost:<port>`.
