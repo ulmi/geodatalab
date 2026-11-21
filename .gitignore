@@ -10,5 +10,8 @@ geodatalab.toml
 __pycache__/
 *.pyc
 
-# Claude Code local overrides
-.claude/settings.local.json
+# Our own notes and agent config — kept locally, not published
+CLAUDE.md
+HANDOFF.md
+DOCS.md
+.claude/
