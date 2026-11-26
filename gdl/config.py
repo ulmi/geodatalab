@@ -2,7 +2,12 @@
 
 geodatalab.toml holds the default instance at the top level and named
 instances under [instance.<name>], each storing only what differs from the
-default (plus its own port). Example: geodatalab.example.toml.
+default (plus its own port). Settings for gdl itself (not per instance) live
+in [gdl]. Example: geodatalab.example.toml.
+
+Where pixi puts environments is pixi's own setting (`detached-environments`
+in <checkout>/.pixi/config.toml), read and written here but never copied into
+geodatalab.toml: on a noexec drive it must exist before gdl can run at all.
 """
 from __future__ import annotations
 
@@ -35,6 +40,9 @@ MODES = {"lab": "Start JupyterLab", "idle": "No Jupyter (Dev Containers / shell 
 LIMIT_KEYS = ("memory", "memory_reserve", "cpus")
 INSTANCE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
 DATA_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+GDL_KEYS = {"runtime": "", "theme": "gruvbox"}  # [gdl] in geodatalab.toml; "" runtime = auto
+RUNTIMES = {"": "auto — podman if installed, else docker", "podman": "Podman", "docker": "Docker"}
+PIXI_CONFIG = Path(".pixi") / "config.toml"     # relative to a pixi project folder
 
 
 class GdlError(Exception):
@@ -99,9 +107,11 @@ class Settings:
         self.path = path or settings_path()
         self.base: dict = {}
         self.instances: dict[str, dict] = {}
+        self.gdl: dict = dict(GDL_KEYS)
         if self.path.exists():
             raw = tomllib.loads(self.path.read_text(encoding="utf-8"))
             self.instances = {n: _flat(d) for n, d in raw.pop("instance", {}).items()}
+            self.gdl.update({k: v for k, v in raw.pop("gdl", {}).items() if k in GDL_KEYS})
             self.base = _flat(raw)
 
     @property
@@ -137,6 +147,14 @@ class Settings:
             elif k in KEYS:
                 setattr(inst, k, int(v) if k == "port" else v)
         return inst
+
+    def set_gdl(self, **changes) -> None:
+        """Change settings of gdl itself ([gdl]) and save."""
+        for k, v in changes.items():
+            if k not in GDL_KEYS:
+                raise KeyError(k)
+            self.gdl[k] = v
+        self.save()
 
     def update(self, inst: Instance, **changes) -> Instance:
         """Apply changes to an instance and save. Named instances keep only
@@ -212,6 +230,9 @@ class Settings:
 
     def save(self) -> None:
         doc = _nest(self.base)
+        gdl = {k: v for k, v in self.gdl.items() if v != GDL_KEYS[k]}
+        if gdl:
+            doc["gdl"] = gdl
         if self.instances:
             doc["instance"] = {n: _nest(d) for n, d in sorted(self.instances.items())}
         header = "# geodatalab settings — edited by `pixi run gdl` or by hand. Not committed.\n"
@@ -252,6 +273,48 @@ def check_data_name(name: str, existing: list[DataDir]) -> None:
         raise GdlError(f"Invalid data folder name '{name}': lowercase letters, digits, - and _.")
     if any(d.name == name for d in existing):
         raise GdlError(f"Data folder '{name}' already exists.")
+
+
+# ── Where pixi puts environments (pixi's `detached-environments`) ──────────────
+
+def pixi_env_location(project: Path = ROOT) -> str:
+    """'' = inside the project (.pixi/envs), 'cache' = pixi's cache folder, else a folder."""
+    cfg = project / PIXI_CONFIG
+    try:
+        v = tomllib.loads(cfg.read_text(encoding="utf-8")).get("detached-environments", False)
+    except (OSError, tomllib.TOMLDecodeError):
+        return ""
+    return "cache" if v is True else (v if isinstance(v, str) else "")
+
+
+def write_pixi_env_location(value: str, project: Path = ROOT) -> None:
+    """Set (or clear, for '') detached-environments in a project's .pixi/config.toml,
+    keeping its other keys."""
+    cfg = project / PIXI_CONFIG
+    try:
+        doc = tomllib.loads(cfg.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        doc = {}
+    if value:
+        doc["detached-environments"] = True if value == "cache" else value
+    else:
+        doc.pop("detached-environments", None)
+    if doc:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(tomli_w.dumps(doc), encoding="utf-8")
+    else:
+        cfg.unlink(missing_ok=True)
+
+
+def noexec(path: Path) -> bool:
+    """True if programs can't run from `path` (a noexec mount). Linux only; False elsewhere."""
+    path = Path(path)
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    try:
+        return bool(os.statvfs(path).f_flag & getattr(os, "ST_NOEXEC", 0))
+    except (OSError, AttributeError):
+        return False
 
 
 # ── Legacy .geodatalab (sourced shell file) → geodatalab.toml ─────────────────

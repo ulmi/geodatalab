@@ -16,7 +16,7 @@ from pathlib import Path
 import tomli_w
 
 from .backends import Pixi, capture
-from .config import ROOT, GdlError, Instance
+from .config import ROOT, GdlError, Instance, pixi_env_location, write_pixi_env_location
 
 VERSION = 1
 ROOT_MANIFEST = ROOT / "pixi.toml"
@@ -108,6 +108,8 @@ def write_env_project(inst: Instance, manifest: str, lock: str) -> Path:
     (d / "pixi.toml").write_text(manifest, encoding="utf-8")
     (d / "pixi.lock").write_text(lock, encoding="utf-8")
     (d / "profile").write_text(inst.profile + "\n")  # a later profile change returns to the shared env
+    write_pixi_env_location(pixi_env_location(ROOT), d)  # nested projects don't inherit the checkout's
+    Pixi._prefixes.pop(str(d / "pixi.toml"), None)
     return d
 
 

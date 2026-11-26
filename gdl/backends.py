@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import json
 import os
 import platform
 import re
@@ -23,7 +24,9 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
-from .config import GDL_PYTHON, PROFILES, ROOT, STATE_ROOT, GdlError, Instance, Settings, port_open
+from . import config
+from .config import (GDL_PYTHON, PROFILES, ROOT, STATE_ROOT, GdlError, Instance, Settings, noexec,
+                     pixi_env_location, port_open, write_pixi_env_location)
 from .render import NETWORK, build_root, gdl_env, image, service_url, service_urls, write_fragment
 
 Out = Callable[[str], None]
@@ -137,6 +140,7 @@ class Backend:
 
     def label(self) -> str: ...
     def is_running(self) -> bool: ...
+    def installed(self) -> bool: ...  # built: env installed / image present
     def health(self) -> str: ...
     def start(self, out: Out) -> None: ...
     def stop(self, out: Out) -> None: ...
@@ -173,11 +177,18 @@ class Backend:
 _RUNTIME: tuple[str, list[str]] | None = None
 
 
+def reset_runtime() -> None:
+    """Forget the detected runtime (after the runtime setting changed)."""
+    global _RUNTIME
+    _RUNTIME = None
+
+
 def detect_runtime() -> tuple[str, list[str]]:
     global _RUNTIME
     if _RUNTIME:
         return _RUNTIME
-    wanted = os.environ.get("GDL_RUNTIME")  # podman | docker; default: podman, then docker
+    # GDL_RUNTIME (one-off) > [gdl] runtime in geodatalab.toml > podman, then docker
+    wanted = os.environ.get("GDL_RUNTIME") or Settings().gdl.get("runtime", "")
     for rt in ([wanted] if wanted else ["podman", "docker"]):
         if not shutil.which(rt):
             continue
@@ -231,6 +242,21 @@ class Container(Backend):
         if not capture([self.rt, "inspect", "-f", "{{.Id}}", self.inst.container_name]):
             return None
         return self._inspect(f'{{{{index .Config.Labels "{self.LABEL}"}}}}').replace("<no value>", "")
+
+    def image_profile(self, img: str) -> str | None:
+        """Profile a workbench image was built for (its GDL_PROFILE); None = no such image."""
+        env = capture([self.rt, "image", "inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", img])
+        if not env:
+            return None
+        return next((ln.split("=", 1)[1] for ln in env.splitlines() if ln.startswith("GDL_PROFILE=")), "")
+
+    def installed(self) -> bool:
+        """The image this instance starts from exists (workbench: built for its profile)."""
+        img = image(self.inst)
+        if self.inst.is_service:
+            return bool(capture([self.rt, "image", "inspect", "-f", "{{.Id}}", img]))
+        have = self.image_profile(img)
+        return have is not None and have in (self.inst.profile, "")
 
     def _guard_foreign(self) -> None:
         owner = self._owner()
@@ -317,13 +343,15 @@ class Container(Backend):
             out(f"From this machine:  {service_url(self.inst)}")
             out(f"From containers:    {service_url(self.inst, internal=True)}")
             return
-        img = image(self.inst)
-        if not capture([self.rt, "image", "inspect", "-f", "{{.Id}}", img]):
-            if self.inst.image_tag and capture([self.rt, "image", "inspect", "-f", "{{.Id}}", "geodatalab:latest"]):
-                out(f"Image {img} not found — using geodatalab:latest")
-                self.inst = dataclasses.replace(self.inst, image_tag="")
-            else:
-                raise GdlError(f"Image not found: {img}. Build it first.")
+        img, want = image(self.inst), self.inst.profile
+        have = self.image_profile(img)
+        if have is None and img != "geodatalab:latest" and self.image_profile("geodatalab:latest") in (want, ""):
+            out(f"Image {img} not found — using geodatalab:latest (also '{want}')")
+            self.inst = dataclasses.replace(self.inst, image_tag="")
+        elif have is None:
+            raise GdlError(f"No '{want}' image yet ({img}). Build it first.")
+        elif have not in (want, ""):
+            raise GdlError(f"{img} is the '{have}' image, but this instance is '{want}'. Build it first.")
         out(f"Starting [{image(self.inst)}, mode {self.inst.mode}, port {self.inst.port}] ...")
         self._run_compose(out, "up", "-d")
         self._wait(out)
@@ -453,9 +481,84 @@ class Pixi(Backend):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("PIXI_", "CONDA_"))}
         return {**env, **(extra or {})}
 
+    _prefixes: dict[str, dict[str, Path]] = {}  # manifest -> {env: prefix}, from `pixi info`
+
+    @classmethod
+    def env_prefixes(cls, manifest: Path) -> dict[str, Path]:
+        """Where pixi puts each environment of a project — asked, not assumed, because
+        `detached-environments` moves them out of <project>/.pixi/envs."""
+        key = str(manifest)
+        if key not in cls._prefixes:
+            try:
+                info = json.loads(capture([cls.exe(), "info", "--json", "--manifest-path", key],
+                                          env=cls.clean_env()) or "{}")
+                found = {e["name"]: Path(e["prefix"]) for e in info.get("environments_info", [])}
+            except (GdlError, ValueError, KeyError, TypeError):
+                found = {}
+            if not found:  # pixi missing or failing: the default layout, not cached
+                return {}
+            cls._prefixes[key] = found
+        return cls._prefixes[key]
+
     def prefix(self, inst: Instance | None = None) -> Path:
         manifest, env = self.project(inst)
-        return manifest.parent / ".pixi" / "envs" / env
+        return self.env_prefixes(manifest).get(env) or manifest.parent / ".pixi" / "envs" / env
+
+    @classmethod
+    def envs_dir(cls) -> Path:
+        """The folder holding the shared (root project) environments."""
+        p = cls.env_prefixes(cls.MANIFEST).get("default")
+        return p.parent if p else cls.MANIFEST.parent / ".pixi" / "envs"
+
+    # ── where environments live (pixi's detached-environments, see config.py) ──
+
+    @staticmethod
+    def location() -> str:
+        """'' = in the checkout (.pixi/envs), 'cache' = pixi's cache folder, else a folder."""
+        return pixi_env_location(ROOT)
+
+    @classmethod
+    def set_location(cls, settings: Settings, value: str, out: Out) -> None:
+        """Move future pixi environments: write the setting to the checkout and to every
+        own env project (nested projects don't inherit it). Nothing is copied: Build
+        reinstalls from pixi's cache; the old envs become reclaimable in Free space."""
+        value = value.strip()
+        if value not in ("", "cache"):
+            folder = Path(value).expanduser()
+            if not folder.is_absolute():
+                raise GdlError("Custom folder: give an absolute path.")
+            value = str(folder)
+        if value == cls.location():
+            return
+        target = ROOT if value == "" else Path(value) if value != "cache" else None
+        if target is not None and noexec(target):
+            raise GdlError(f"{target} is on a noexec drive — programs in pixi environments can't run there. "
+                           "Choose pixi's cache folder or another folder.")
+        insts = [settings.get(n) for n in (settings.names() if settings.exists else [])]
+        pixi = [Pixi(settings, i) for i in insts if not i.is_service and i.backend == "pixi"]
+        running = [b.inst.name for b in pixi if b.is_running()]
+        if running:
+            raise GdlError(f"Stop {', '.join(running)} first (they run from the current environments).")
+        old = {cls.envs_dir()} | {b.prefix().parent for b in pixi if b.owns_env()}
+        if value not in ("", "cache"):
+            Path(value).mkdir(parents=True, exist_ok=True)
+        write_pixi_env_location(value, ROOT)
+        for b in pixi:
+            if b.owns_env():
+                write_pixi_env_location(value, cls.own_project(b.inst))
+        cls._prefixes.clear()
+        new = {cls.envs_dir()} | {b.prefix().parent for b in pixi if b.owns_env()}
+        stale = config.STATE_ROOT / "old-pixi-envs"
+        known = set(stale.read_text().splitlines()) if stale.exists() else set()
+        known = sorted((known | {str(p) for p in old if p.exists()}) - {str(p) for p in new})
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text("".join(f"{p}\n" for p in known))
+        out(f"pixi environments now go to {cls.envs_dir()}.")
+        if pixi:
+            out("Build (b) each pixi instance before starting it — quick, files come from pixi's cache.")
+        out("The manager env moves too: the next `pixi run gdl` reinstalls it (about 200 MB).")
+        if known:
+            out("The old environments can go: GDL Tools → Free disk space.")
 
     def installed(self) -> bool:
         p = self.prefix()

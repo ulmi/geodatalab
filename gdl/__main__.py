@@ -131,8 +131,14 @@ def run(a: argparse.Namespace) -> int:
             path = export_recipe(inst, Path(a.args[0]) if a.args else Path.home(), a.label)
             say(f"Exported the env of '{inst.name}' to {path}")
         case "clean":
-            if input(f"Remove {inst.backend} resources of '{inst.name}'"
-                     f"{' and ALL geodatalab images' if a.images else ''}? [y/N] ").lower() == "y":
+            try:
+                yes = input(f"Remove {inst.backend} resources of '{inst.name}'"
+                            f"{' and ALL geodatalab images' if a.images else ''}? [y/N] ").lower() == "y"
+            except EOFError:  # no terminal (script, pipe without input): never remove unasked
+                print()
+                say("Not removed: no answer (run it in a terminal, or pipe in 'y').", "33")
+                return 1
+            if yes:
                 be.clean(out, images=a.images)
     return 0
 

@@ -13,15 +13,16 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Center, Grid, Horizontal, Vertical
+from textual.containers import Center, Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import (Button, Checkbox, DataTable, Footer, Header, Input, Label, RichLog,
-                             Select, Sparkline, Static, TabbedContent, TabPane)
+from textual.widget import Widget
+from textual.widgets import (Button, Checkbox, Collapsible, DataTable, Footer, Header, Input, Label,
+                             RichLog, Select, Static, TabbedContent, TabPane)
 
-from .backends import Backend, backend_for
-from .config import (BACKENDS, INSTANCE_RE, MODES, PROFILES, DataDir, GdlError, Instance, Settings,
-                     check_data_name)
-from .monitor import Monitor, Sample, human
+from .backends import Backend, Pixi, backend_for, reset_runtime
+from .config import (BACKENDS, INSTANCE_RE, LIMIT_KEYS, MODES, PROFILES, RUNTIMES, DataDir, GdlError,
+                     Instance, Settings, check_data_name)
+from .monitor import Monitor, Sample, braille, human, level_style
 from .cleanup import Item, delete_instance, instance_files, reclaimable
 from .recipe import Recipe, export_recipe, import_recipe
 from .render import NETWORK, service_url
@@ -56,6 +57,24 @@ def logo() -> ComposeResult:
     with Center(classes="logo"):
         yield Static(art, classes="logo-art")
     yield Static(Text.assemble(("geodatalab", "bold"), "  —  GIS Data Laboratory"), classes="logo-title")
+
+
+class Graph(Widget):
+    """A braille ("dot matrix") area graph of a series; redraws to its size."""
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.values: list[float] = []
+        self.top = 100.0
+        self.style_ = ""  # one colour for all rows ("" = by height)
+        self.min_dot = False
+
+    def plot(self, values: list[float], top: float, style: str = "", min_dot: bool = False) -> None:
+        self.values, self.top, self.style_, self.min_dot = values, top, style, min_dot
+        self.refresh()
+
+    def render(self) -> Text:
+        return braille(self.values, self.size.width, self.size.height, self.top, self.style_, self.min_dot)
 
 
 def options(d: dict) -> list[tuple[str, str]]:
@@ -353,23 +372,33 @@ class GeodatalabApp(App):
     #overview { padding: 1 2; height: auto; }
     .buttons { height: auto; padding: 1 1 0 1; }
     .buttons Button { margin-right: 2; min-width: 0; width: auto; padding: 0 2; }
-    #form { grid-size: 2; grid-columns: 18 1fr; grid-rows: auto; padding: 1 2; height: auto; grid-gutter: 0 1; }
-    #form Label { padding-top: 1; }
+    .form { grid-size: 2; grid-columns: 18 1fr; grid-rows: auto; padding: 1 2; height: auto; grid-gutter: 0 1; }
+    .form Label { padding-top: 1; }
+    #limits { margin: 0 1; }
+    #limits .form { padding: 0 1; }
+    #gdl-settings .hint, #settings-hint { padding: 0 2; }
+    #gdl-settings .title { text-style: bold; padding: 1 2 0 2; }
     #data-add { height: auto; padding: 0 1; }
     #data-add Input { width: 1fr; }
     #data-add #d-name { width: 20; }
     #data-add Checkbox, #data-add Button { width: auto; }
     #data-add Button { margin: 1 0 0 1; }
-    #data { height: 1fr; }
-    #monitor { padding: 1 2 0 2; }
-    .meter { height: 1; margin-bottom: 1; }
-    .meter Label { width: 34; }
-    .meter Sparkline { width: 1fr; height: 1; }
-    #monitor .title { text-style: bold; padding-top: 1; }
-    #m-kernels { height: auto; max-height: 10; }
-    #m-procs { height: 1fr; }
-    #m-note { color: $text-muted; }
-    #logs-head { color: $text-muted; padding: 0 1; }
+    #data { height: auto; max-height: 12; }
+    #c-data, #limits { margin: 0 1; }
+    #c-data .hint { padding: 0 0 1 0; }
+    #monitor { padding: 0 1; }
+    .m-head { padding-top: 1; height: auto; }
+    .m-label { height: auto; margin-top: 1; }
+    #m-graphs { height: auto; }
+    #m-graphs Vertical { width: 1fr; height: auto; }
+    #m-graphs Vertical:first-child { padding-right: 2; }
+    #m-graphs Vertical:last-child { border-left: vkey $primary-darken-2; padding-left: 2; }
+    Graph { height: 5; width: 1fr; }
+    #m-note { color: $text-muted; height: auto; }
+    #m-kernels { height: auto; max-height: 12; }
+    #m-procs { height: 16; }
+    #logs { height: 18; }
+    #logs-head { color: $text-muted; }
     #tabs #tabs-list-bar, #tabs #tabs-list { width: 1fr; }
     #tabs .tab-spacer { width: 1fr; height: 1; }
     #tools { padding: 1 2; height: auto; }
@@ -387,7 +416,7 @@ class GeodatalabApp(App):
         Binding("s", "start", "Start"), Binding("x", "stop", "Stop"), Binding("r", "restart", "Restart"),
         Binding("o", "open", "Open"), Binding("c", "copy", "Copy URL"), Binding("h", "shell", "Shell"),
         Binding("b", "build", "Build"), Binding("l", "lock", "Lock"), Binding("u", "update", "Update"),
-        Binding("f", "follow", "Logs"), Binding("n", "new", "New inst."), Binding("d", "delete", "Del inst."),
+        Binding("f", "follow", "Log"), Binding("n", "new", "New inst."), Binding("d", "delete", "Del inst."),
         Binding("k", "cleanup", "Free space", show=False), Binding("e", "export", "Export", show=False),
         Binding("q", "quit", "Quit"),
     ]
@@ -400,7 +429,9 @@ class GeodatalabApp(App):
         self.follow_stop: threading.Event | None = None
         self._following = ""
         self.monitor = Monitor()
-        self.theme = "gruvbox"
+        self.theme = self.settings.gdl.get("theme") or "gruvbox"
+        if self.theme not in self.available_themes:
+            self.theme = "gruvbox"
 
     INSTANCE_ACTIONS = {"start", "stop", "restart", "open", "copy", "shell", "build", "lock", "update",
                         "follow", "delete", "export"}
@@ -426,7 +457,7 @@ class GeodatalabApp(App):
                 yield Label("Instances")
                 yield DataTable(id="instances", cursor_type="row", zebra_stripes=True)
             with TabbedContent(id="tabs"):
-                with TabPane("Overview", id="tab-overview"):
+                with TabPane("Overview", id="tab-overview"), VerticalScroll():
                     yield Static(id="overview")
                     with Horizontal(classes="buttons"):
                         for name in ("start", "stop", "restart", "open", "copy"):
@@ -435,24 +466,27 @@ class GeodatalabApp(App):
                         yield Button("New instance…", variant="primary", id="do-new", compact=True)
                     with Horizontal(classes="buttons"):
                         yield Button("Export recipe…", id="do-export", compact=True)
-                with TabPane("Monitor", id="tab-monitor"):
-                    with Vertical(id="monitor"):
-                        with Horizontal(classes="meter"):
-                            yield Label("CPU", id="m-cpu-label")
-                            yield Sparkline([], id="m-cpu", summary_function=max)
-                        with Horizontal(classes="meter"):
-                            yield Label("Memory", id="m-mem-label")
-                            yield Sparkline([], id="m-mem", summary_function=max)
-                        yield Static(id="m-note")
-                        yield Label("Notebooks", classes="title")
+                with TabPane("Monitor", id="tab-monitor"), VerticalScroll(id="monitor"):
+                    yield Static(id="m-inst-head", classes="m-head")
+                    with Horizontal(id="m-graphs"):
+                        with Vertical():
+                            yield Static(id="m-cpu-label", classes="m-label")
+                            yield Graph(id="m-cpu")
+                        with Vertical():
+                            yield Static(id="m-mem-label", classes="m-label")
+                            yield Graph(id="m-mem")
+                    yield Static(id="m-note")
+                    with Collapsible(title="Notebooks", id="c-kernels", collapsed=False):
                         yield DataTable(id="m-kernels", cursor_type="row", zebra_stripes=True)
-                        yield Label("Processes", classes="title")
+                    with Collapsible(title="Processes", id="c-procs"):
                         yield DataTable(id="m-procs", cursor_type="row", zebra_stripes=True)
-                with TabPane("Logs", id="tab-logs"):
-                    yield Static(id="logs-head")
-                    yield RichLog(id="logs", wrap=True, max_lines=5000)
-                with TabPane("Settings", id="tab-settings"):
-                    with Grid(id="form"):
+                    with Collapsible(title="Log", id="c-log"):
+                        yield Static(id="logs-head")
+                        yield RichLog(id="logs", wrap=True, max_lines=5000)
+                with TabPane("Settings", id="tab-settings"), VerticalScroll():
+                    yield Static("Settings of the selected instance. Settings for gdl itself: GDL Settings.",
+                                 classes="hint", id="settings-hint")
+                    with Grid(id="form", classes="form"):
                         # class "wb": workbenches only, "svc": services only
                         yield Label("Backend", classes="wb")
                         yield Select(options(BACKENDS), allow_blank=False, id="f-backend", classes="wb")
@@ -470,24 +504,28 @@ class GeodatalabApp(App):
                         yield Input(id="f-open", classes="wb", placeholder="workspace, data/<name> or empty")
                         yield Label("Image tag", classes="wb")
                         yield Input(id="f-image_tag", classes="wb", placeholder="container: latest")
-                        yield Label("Shared mem."); yield Input(id="f-shm_size", placeholder="container /dev/shm, e.g. 2g")
-                        yield Label("Memory");    yield Input(id="f-memory", placeholder="container limit, e.g. 16G")
-                        yield Label("Memory res."); yield Input(id="f-memory_reserve", placeholder="e.g. 4G")
-                        yield Label("CPUs");      yield Input(id="f-cpus", placeholder="e.g. 6")
+                    with Collapsible(title="Container limits", id="limits"):
+                        with Grid(classes="form"):
+                            yield Label("Shared mem."); yield Input(id="f-shm_size", placeholder="/dev/shm, e.g. 2g")
+                            yield Label("Memory");      yield Input(id="f-memory", placeholder="limit, e.g. 16G")
+                            yield Label("Memory res."); yield Input(id="f-memory_reserve", placeholder="e.g. 4G")
+                            yield Label("CPUs");        yield Input(id="f-cpus", placeholder="e.g. 6")
                     with Horizontal(classes="buttons"):
                         yield Button("Save", variant="primary", id="save", compact=True)
-                with TabPane("Data", id="tab-data"):
-                    yield DataTable(id="data", cursor_type="row")
-                    with Horizontal(id="data-add"):
-                        yield Input(placeholder="name", id="d-name")
-                        yield Input(placeholder="/path/to/folder", id="d-path")
-                        yield Checkbox("read-only", id="d-ro")
-                        yield Button("Add", id="d-add", compact=True)
-                    with Horizontal(classes="buttons"):
-                        yield Button("Remove", id="d-rm", compact=True)
-                        yield Button("Toggle read-only", id="d-toggle", compact=True)
-                        yield Button("Jupyter opens here", id="d-open", compact=True)
-                with TabPane("GDL Tools", id="tab-tools"):
+                    with Collapsible(title="Data folders", id="c-data"):
+                        yield Static("Mounted at data/<name> next to the workspace. Changes here are saved "
+                                     "at once (restart to apply).", classes="hint")
+                        yield DataTable(id="data", cursor_type="row")
+                        with Horizontal(id="data-add"):
+                            yield Input(placeholder="name", id="d-name")
+                            yield Input(placeholder="/path/to/folder", id="d-path")
+                            yield Checkbox("read-only", id="d-ro")
+                            yield Button("Add", id="d-add", compact=True)
+                        with Horizontal(classes="buttons"):
+                            yield Button("Remove", id="d-rm", compact=True)
+                            yield Button("Toggle read-only", id="d-toggle", compact=True)
+                            yield Button("Jupyter opens here", id="d-open", compact=True)
+                with TabPane("GDL Tools", id="tab-tools"), VerticalScroll():
                     with Vertical(id="tools"):
                         yield Label("Free disk space", classes="title")
                         yield Static("Lists what can go without affecting any instance — pixi download cache, "
@@ -498,6 +536,31 @@ class GeodatalabApp(App):
                             yield Button("Free disk space…", id="do-cleanup", compact=True)
                 with TabPane("GDL Activity", id="tab-activity"):
                     yield RichLog(id="activity", wrap=True, max_lines=5000)
+                with TabPane("GDL Settings", id="tab-gdl"), VerticalScroll(id="gdl-settings"):
+                    yield Static("Settings for gdl itself — they apply to every instance.", classes="hint")
+                    yield Label("pixi environments", classes="title")
+                    yield Static("Where pixi installs environments (pixi's detached-environments, stored in "
+                                 ".pixi/config.toml of this checkout). Move them off the checkout when it is on "
+                                 "a drive that can't run programs (noexec).", classes="hint")
+                    with Grid(classes="form"):
+                        yield Label("Location")
+                        yield Select([("In the checkout (.pixi/envs)", "checkout"),
+                                      ("pixi's cache folder", "cache"), ("A folder of my choice", "folder")],
+                                     allow_blank=False, id="g-location")
+                        yield Label("Folder", id="g-folder-label")
+                        yield Input(id="g-folder", placeholder="/path/to/pixi-envs")
+                    yield Static(id="g-where", classes="hint")
+                    yield Label("Containers", classes="title")
+                    with Grid(classes="form"):
+                        yield Label("Runtime")
+                        yield Select([(v, k) for k, v in RUNTIMES.items()], allow_blank=False, id="g-runtime")
+                    yield Label("Look", classes="title")
+                    with Grid(classes="form"):
+                        yield Label("Theme")
+                        yield Select([(t, t) for t in sorted(self.available_themes)], allow_blank=False,
+                                     id="g-theme")
+                    with Horizontal(classes="buttons"):
+                        yield Button("Save", variant="primary", id="g-save", compact=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -507,12 +570,14 @@ class GeodatalabApp(App):
         self.show_instance()
         self.refresh_states()
         self.set_interval(5, self.refresh_states)
-        self.query_one("#m-kernels", DataTable).add_columns("Notebook", "State", "CPU %", "Memory", "PID")
-        self.query_one("#m-procs", DataTable).add_columns("PID", "CPU %", "Memory", "Command")
+        self.query_one("#m-kernels", DataTable).add_columns("Notebook", "State", "CPU %", "Memory",
+                                                             "Procs", "Threads", "PID")
+        self.query_one("#m-procs", DataTable).add_columns("PID", "CPU %", "Threads", "Memory", "Command")
         self.set_interval(2, self.tick_monitor)
         # push the GDL tabs to the right end of the tab bar (Tabs only counts Tab widgets)
         tools = self.query_one("#tabs #--content-tab-tab-tools")
         tools.parent.mount(Static(classes="tab-spacer"), before=tools)
+        self.show_gdl_settings()
 
     # ── state ──────────────────────────────────────────────────────────────────
 
@@ -616,19 +681,47 @@ class GeodatalabApp(App):
     def paint_monitor(self, name: str, s: Sample) -> None:
         if name != self.current:
             return
-        cpu, mem = self.monitor.history(name)
-        self.query_one("#m-cpu", Sparkline).data = cpu or [0]
-        self.query_one("#m-mem", Sparkline).data = mem or [0]
-        self.query_one("#m-cpu-label", Label).update(f"CPU     {s.cpu:6.1f} %  ({s.cores} cores)")
-        limit = f" / {human(s.mem_limit)}" if s.mem_limit else ""
-        self.query_one("#m-mem-label", Label).update(f"Memory  {human(s.rss)}{limit}")
+        # this instance: its processes (pixi: Jupyter's tree; container: the whole container)
+        cpu, rss = self.monitor.history(name)
+        scope = "Jupyter, its kernels and what they start" if self.inst.backend == "pixi" \
+            and not self.inst.is_service else "everything in its container"
+        self.query_one("#m-inst-head", Static).update(Text.assemble(
+            (name, "bold"), "   ", (scope if s.running else "stopped", "dim")))
+        if not s.running:  # no stale history: nothing of this instance is running
+            for g in ("#m-cpu", "#m-mem"):
+                self.query_one(g, Graph).plot([], 1.0)
+            self.query_one("#m-cpu-label", Static).update(Text("CPU —", style="dim"))
+            self.query_one("#m-mem-label", Static).update(Text("Memory —", style="dim"))
+            self.query_one("#m-note", Static).update("")
+            self._fill(self.query_one("#m-kernels", DataTable), [])
+            self._fill(self.query_one("#m-procs", DataTable), [])
+            self.query_one("#c-kernels", Collapsible).title = "Notebooks"
+            self.query_one("#c-procs", Collapsible).title = "Processes"
+            return
+        # full scale = what the instance may use: its CPU limit, else every core
+        cores = s.cpu_limit or s.cores or 1
+        share = s.cpu / (cores * 100)
+        self.query_one("#m-cpu-label", Static).update(Text.assemble(
+            "CPU ", (f"{s.cpu / 100:.1f} cores", level_style(share)),
+            f" busy of {cores:g}{' (limit)' if s.cpu_limit else ''} ({share:.0%})"))
+        self.query_one("#m-cpu", Graph).plot(cpu, cores * 100.0, min_dot=True)
+        limit = s.mem_limit
+        self.query_one("#m-mem-label", Static).update(Text.assemble(
+            "Memory ", (human(s.rss), level_style(s.rss / limit if limit else 0)),
+            f" of {human(limit)}" if limit else ""))
+        # full height = what the instance may use: its container limit, else the machine's RAM
+        top = float(limit or max(rss or [1]))
+        self.query_one("#m-mem", Graph).plot(rss, top, level_style(s.rss / top), min_dot=True)
         self.query_one("#m-note", Static).update(s.note)
+
         home = str(Path.home())
-        busy = {"busy": "yellow", "idle": "green", "starting": "yellow"}
+        busy = {"busy": "yellow", "idle": "green", "starting": "yellow", "background": "yellow"}
         self._fill(self.query_one("#m-kernels", DataTable), [
             (k["id"], [k["path"], Text(k["state"], style=busy.get(k["state"], "red")),
-                       f"{k['cpu']:.1f}", human(k["rss"]) if k["rss"] else "", str(k["pid"])])
+                       f"{k['cpu']:.1f}", human(k["rss"]) if k["rss"] else "", str(k.get("procs", "")),
+                       str(k.get("threads", "")), str(k["pid"])])
             for k in s.kernels])
+        self.query_one("#c-kernels", Collapsible).title = f"Notebooks ({len(s.kernels)})"
         notebooks = {k["id"]: k["path"] for k in s.kernels}
 
         def command(p: dict) -> str:
@@ -640,7 +733,9 @@ class GeodatalabApp(App):
 
         procs = sorted(s.procs, key=lambda p: (-p["cpu"], -p["rss"]))[:100]
         self._fill(self.query_one("#m-procs", DataTable), [
-            (str(p["pid"]), [str(p["pid"]), f"{p['cpu']:.1f}", human(p["rss"]), command(p)]) for p in procs])
+            (str(p["pid"]), [str(p["pid"]), f"{p['cpu']:.1f}", str(p.get("threads", "")), human(p["rss"]),
+                             command(p)]) for p in procs])
+        self.query_one("#c-procs", Collapsible).title = f"Processes ({len(s.procs)})"
 
     @staticmethod
     def _fill(table: DataTable, rows: list[tuple[str, list]]) -> None:
@@ -670,10 +765,12 @@ class GeodatalabApp(App):
         for key in ("port", "workspace", "open", "image_tag", "image", "shm_size", "memory", "memory_reserve", "cpus"):
             self.query_one(f"#f-{key}", Input).value = str(getattr(i, key))
         self.query_one("#f-env", Input).value = "; ".join(f"{k}={v}" for k, v in i.env.items())
+        self.query_one("#limits", Collapsible).collapsed = not any(getattr(i, k) for k in (*LIMIT_KEYS, "shm_size"))
         table = self.query_one("#data", DataTable)
         table.clear()
         for d in i.data:
             table.add_row(d.name, "yes" if d.ro else "", d.path, key=d.name)
+        self.query_one("#c-data", Collapsible).title = f"Data folders ({len(i.data)})" if i.data else "Data folders"
 
     @on(DataTable.RowHighlighted, "#instances")
     def pick(self, event: DataTable.RowHighlighted) -> None:
@@ -703,9 +800,23 @@ class GeodatalabApp(App):
         self.call_from_thread(self.show_instance)
         self.call_from_thread(self.refresh_states)
 
-    def action_start(self) -> None: self.op("Start", "start")
+    def action_start(self) -> None:
+        if not self.refuse_unsaved("Start"):
+            self.op("Start", "start")
+
     def action_stop(self) -> None: self.op("Stop", "stop")
-    def action_restart(self) -> None: self.op("Restart", "restart")
+
+    def action_restart(self) -> None:
+        if not self.refuse_unsaved("Restart"):
+            self.op("Restart", "restart")
+
+    def refuse_unsaved(self, what: str) -> bool:
+        """Start/Restart would run with the saved settings, not what's typed in the form."""
+        changed = self.unsaved()
+        if changed:
+            self.notify(f"Settings has unsaved changes ({', '.join(changed)}). Save, then {what.lower()}.",
+                        severity="warning", timeout=8)
+        return bool(changed)
     def action_build(self) -> None: self.op(f"Build {self.inst.profile}", "build")
     def action_lock(self) -> None: self.op(f"Lock {self.inst.profile}", "lock", profiles=[self.inst.profile])
 
@@ -824,20 +935,30 @@ class GeodatalabApp(App):
             self.follow_stop = None
 
     def action_follow(self) -> None:
-        self.query_one("#tabs", TabbedContent).active = "tab-logs"
+        self.query_one("#c-log", Collapsible).collapsed = False
+        self.query_one("#tabs", TabbedContent).active = "tab-monitor"
+        self.follow_logs()
+        self.call_after_refresh(self.query_one("#c-log").scroll_visible)
+
+    @on(Collapsible.Expanded, "#c-log")
+    @on(Collapsible.Collapsed, "#c-log")
+    def log_toggled(self) -> None:
+        self.follow_logs()
 
     def follow_logs(self) -> None:
-        """(Re)start following the selected instance's log in the Logs tab."""
+        """(Re)start following the selected instance's log — only while the Monitor tab
+        is open with its Log panel expanded."""
         self.stop_following()
         view = self.query_one("#logs", RichLog)
         view.clear()
-        if self.query_one("#tabs", TabbedContent).active != "tab-logs":
+        if self.query_one("#tabs", TabbedContent).active != "tab-monitor" or \
+                self.query_one("#c-log", Collapsible).collapsed:
             return
         if self.current not in self.names():
             self.query_one("#logs-head", Static).update("No instance yet.")
             return
         self.query_one("#logs-head", Static).update(
-            Text.assemble("Log of ", (self.current, "bold"), " · live while this tab is open"))
+            Text.assemble("Workbench log of ", (self.current, "bold"), " · live while this panel is open"))
         self.follow_stop = threading.Event()
         self._following = self.current
         self.follow(self.backend(), self.follow_stop)
@@ -917,8 +1038,8 @@ class GeodatalabApp(App):
 
     # ── settings & data ────────────────────────────────────────────────────────
 
-    @on(Button.Pressed, "#save")
-    def save(self) -> None:
+    def form_values(self) -> dict:
+        """The Settings form as instance values (raises ValueError for a bad port)."""
         i = self.inst
         common = ("shm_size", "memory", "memory_reserve", "cpus")
         if i.is_service:
@@ -933,19 +1054,93 @@ class GeodatalabApp(App):
             values = {k: self.query_one(f"#f-{k}", Select).value for k in ("backend", "profile", "mode")}
             values |= {k: self.query_one(f"#f-{k}", Input).value.strip()
                        for k in ("workspace", "open", "image_tag", *common)}
+        values["port"] = int(self.query_one("#f-port", Input).value)
+        values["workspace"] = str(Path(values["workspace"]).expanduser()) if values["workspace"] else ""
+        return values
+
+    def unsaved(self) -> list[str]:
+        """Settings fields that differ from what's saved (typed, Save not pressed)."""
+        if self.current not in self.names():
+            return []
         try:
-            values["port"] = int(self.query_one("#f-port", Input).value)
+            values = self.form_values()
+        except ValueError:
+            return ["port"]
+        i = self.inst
+        return [k for k, v in values.items() if v != getattr(i, k)]
+
+    @on(Button.Pressed, "#save")
+    def save(self) -> None:
+        i = self.inst
+        try:
+            values = self.form_values()
         except ValueError:
             self.notify("Port must be a number.", severity="error")
             return
-        values["workspace"] = str(Path(values["workspace"]).expanduser()) if values["workspace"] else ""
         running = self.backend().is_running()
         if running and values["backend"] != i.backend:
             self.notify("Stop the instance before switching backend.", severity="error")
             return
-        self.settings.update(i, **values)
-        self.notify("Saved." + ("  Restart (r) to apply." if running else ""))
+        switched = values["backend"] != i.backend
+        inst = self.settings.update(i, **values)
+        try:
+            built = backend_for(self.settings, inst).installed()
+        except GdlError:  # e.g. no container runtime
+            built = False
+        if switched and not built:
+            what = "image" if inst.backend == "container" else "environment"
+            self.notify(f"Backend is now {inst.backend}. Build (b) its {what} before Start.", timeout=8)
+        else:
+            self.notify("Saved." + ("  Restart (r) to apply." if running else ""))
         self.refresh_states()
+
+    # ── GDL Settings (gdl itself, not an instance) ──────────────────────────────
+
+    def show_gdl_settings(self) -> None:
+        loc = Pixi.location()
+        self.query_one("#g-location", Select).value = {"": "checkout", "cache": "cache"}.get(loc, "folder")
+        self.query_one("#g-folder", Input).value = loc if loc not in ("", "cache") else ""
+        self.query_one("#g-runtime", Select).value = self.settings.gdl.get("runtime", "")
+        self.query_one("#g-theme", Select).value = self.theme
+        self.gdl_folder_visibility()
+        self.gdl_where()
+
+    @work(thread=True, exclusive=True, group="gdl-where")
+    def gdl_where(self) -> None:
+        where = f"Now: {Pixi.envs_dir()}"  # asks pixi (a fraction of a second)
+        self.call_from_thread(self.query_one("#g-where", Static).update, Text(where))
+
+    @on(Select.Changed, "#g-location")
+    def gdl_folder_visibility(self) -> None:
+        custom = self.query_one("#g-location", Select).value == "folder"
+        self.query_one("#g-folder-label").display = custom
+        self.query_one("#g-folder").display = custom
+
+    @on(Button.Pressed, "#g-save")
+    def save_gdl_settings(self) -> None:
+        choice = self.query_one("#g-location", Select).value
+        location = {"checkout": "", "cache": "cache"}.get(choice) if choice != "folder" else \
+            self.query_one("#g-folder", Input).value.strip()
+        if choice == "folder" and not location:
+            self.notify("Enter a folder for the pixi environments.", severity="error")
+            return
+        runtime = self.query_one("#g-runtime", Select).value
+        theme = self.query_one("#g-theme", Select).value
+        if location != Pixi.location():
+            try:
+                Pixi.set_location(self.settings, location, self.say)
+            except GdlError as e:
+                self.notify(str(e), severity="error", timeout=10)
+                self.show_gdl_settings()
+                return
+            self.query_one("#tabs", TabbedContent).active = "tab-activity"
+        if runtime != self.settings.gdl.get("runtime", ""):
+            reset_runtime()
+        self.settings.set_gdl(runtime=runtime, theme=theme)
+        self.theme = theme
+        self.show_gdl_settings()
+        self.refresh_states()
+        self.notify("Saved.")
 
     def selected_data(self) -> DataDir | None:
         table = self.query_one("#data", DataTable)

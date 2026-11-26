@@ -14,7 +14,9 @@ description = "PostgreSQL + PostGIS database"
 port = 5432                          # port inside the container (host port: first free from here)
 volume = "/var/lib/postgresql/data"  # persistent data → named volume geodatalab-<instance>-data
 shm_size = "1g"                      # Docker's default 64 MB is too small for parallel queries
-health = "pg_isready -U {POSTGRES_USER} -d {POSTGRES_DB}"
+# -h 127.0.0.1: the image's first-boot init runs a temporary server on the unix socket
+# only; over TCP this passes once the real server is up
+health = "pg_isready -h 127.0.0.1 -U {POSTGRES_USER} -d {POSTGRES_DB}"
 shell = ["psql", "-U", "{POSTGRES_USER}", "-d", "{POSTGRES_DB}"]
 url = "postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{host}:{port}/{POSTGRES_DB}"
 secrets = ["POSTGRES_PASSWORD"]      # generated per instance, stored in geodatalab.toml

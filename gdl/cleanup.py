@@ -8,6 +8,7 @@ import os
 from datetime import datetime
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -131,6 +132,16 @@ def delete_instance(settings: Settings, name: str, out: Out, keep_files: bool = 
 
 # ── the cleaner ────────────────────────────────────────────────────────────────
 
+def remove_env_dir(d: Path) -> None:
+    """Remove an old envs folder; for a detached one also its <project>-<hash> wrapper
+    when only pixi's marker files are left (never the checkout's .pixi)."""
+    shutil.rmtree(d, ignore_errors=True)
+    wrapper = d.parent
+    if d.name == "envs" and wrapper.name != ".pixi" and wrapper.is_dir() and \
+            {c.name for c in wrapper.iterdir()} <= {".gitignore", ".condapackageignore"}:
+        shutil.rmtree(wrapper, ignore_errors=True)
+
+
 def reclaimable(settings: Settings) -> list[Item]:
     items: list[Item] = []
     names = settings.names() if settings.exists else []
@@ -154,7 +165,7 @@ def reclaimable(settings: Settings) -> list[Item]:
     # pixi envs no instance uses (the manager's own 'default' env always stays)
     used = {i.env_name for i in insts if not i.is_service and i.backend == "pixi"
             and not Pixi(settings, i).owns_env()}
-    envs_dir = Pixi.MANIFEST.parent / ".pixi" / "envs"
+    envs_dir = Pixi.envs_dir()  # .pixi/envs, or elsewhere with detached-environments
     for env in sorted(p.name for p in envs_dir.iterdir()) if envs_dir.is_dir() else []:
         if env != "default" and env not in used:
             items.append(Item(f"Unused pixi env {env}", f"{envs_dir / env} · no instance uses it; "
@@ -162,6 +173,18 @@ def reclaimable(settings: Settings) -> list[Item]:
                               lambda out, env=env: run([Pixi.exe(), "clean", "--manifest-path",
                                                         str(Pixi.MANIFEST), "-e", env], out,
                                                        env=Pixi.clean_env()), default=False, approx=True))
+
+    # environments left behind after moving them (GDL Settings → pixi environments);
+    # never the folder the running manager itself comes from
+    stale = config.STATE_ROOT / "old-pixi-envs"
+    here = Path(sys.prefix).resolve()
+    current = {Pixi.envs_dir().resolve()}
+    for line in stale.read_text().splitlines() if stale.exists() else []:
+        d = Path(line)
+        if d.is_dir() and d.resolve() not in current and not here.is_relative_to(d.resolve()):
+            items.append(Item("pixi environments at their old location", f"{d} · left when they moved; "
+                              "nothing runs from there now", du(d, unique=True),
+                              lambda out, d=d: remove_env_dir(d), approx=True))
 
     # generated state of instances that no longer exist (e.g. deleted before this cleaner)
     state_root = config.STATE_ROOT  # looked up at call time (tests patch it)

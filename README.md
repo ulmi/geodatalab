@@ -31,6 +31,14 @@ cd geodatalab
 pixi run gdl          # opens the manager
 ```
 
+**Checkout on a drive that can't run programs** (mounted `noexec`, such as some data disks): pixi keeps its environments inside the checkout by default, so tell it to put them in its cache folder *before* the first run:
+
+```bash
+pixi config set --local detached-environments true   # only this checkout; or a folder instead of true
+```
+
+Change it later in **GDL Settings**.
+
 The manager opens on an empty list. Press **n** (or **New instance…**) to start the wizard. Step 1 asks for a name and a type: a **workbench** (JupyterLab + GIS stack) or a **service** from a template, such as PostGIS. Step 2 asks what that type needs: backend, profile and workspace folder for a workbench, or the image for a service. The settings go to `geodatalab.toml`. Then press **b** to build a workbench and **s** to start.
 
 ![The manager on first run](images/tui1.png)
@@ -38,7 +46,7 @@ The manager opens on an empty list. Press **n** (or **New instance…**) to star
 ## The manager
 
 ```
-┌ Instances ───────────────┐┌ Overview │ Monitor │ Logs │ Settings │ Data │ … ┐
+┌ Instances ───────────────┐┌ Overview │ Monitor │ Settings │      GDL … ┐
 │ default  pixi       8888 ││ default   pixi · kitchen · mode lab · port 8888 │
 │ pinhel   container  8890 ││ State:      healthy                             │
 │                          ││ URL:        http://localhost:8888/lab?token=…   │
@@ -47,12 +55,13 @@ The manager opens on an empty list. Press **n** (or **New instance…**) to star
 ```
 
 - **Overview:** state, URL and folders of the selected instance.
-- **Monitor:** live CPU and memory, which notebooks are running (idle/busy, CPU, memory) and the processes behind them.
-- **Settings:** backend, profile, mode, port, workspace, start folder and container limits.
-- **Data:** add or remove data folders, toggle read-only, choose where Jupyter opens.
-- **Logs:** the selected instance's workbench log, live while the tab is open (**f** jumps there).
+- **Monitor:** what the selected instance uses — its pixi env's processes (Jupyter, kernels and whatever they start) or everything in its container, nothing else on the machine. CPU (in cores, of all cores) and memory as dot-matrix graphs; **Notebooks** with idle/busy/background, CPU, memory, processes and threads of each kernel *including the processes it started* (multiprocessing, joblib); foldable **Processes** and **Log** (the workbench log, live while open; **f** opens it). "background" = Jupyter says idle but the notebook's threads or processes are still working.
+- **Settings:** the selected instance's backend, profile, mode, port, workspace, start folder; folded panels for container limits and **Data folders** (add/remove, read-only, where Jupyter opens). You can switch backend while the instance is stopped; then build (**b**) the new backend's env or image before starting.
 - **GDL Tools:** Free disk space (shortcut **k**): pixi cache, unused envs and images, leftovers of deleted instances — you pick.
 - **GDL Activity:** what the manager itself does: builds, locks, deletes, clean-ups.
+- **GDL Settings:** settings for the manager itself, for every instance: where pixi puts environments (in the checkout, pixi's cache folder, or a folder of yours), the container runtime (auto, Podman or Docker) and the theme.
+
+
 
 **Delete** (**d**) removes the instance together with its files: its pixi env or container image (unless another instance shares it), a service's data volume, and `.gdl/<name>`. Tick *Keep these files on disk* to only forget the instance. **Free disk space** (GDL Tools tab, or **k**) lists what can go without affecting any instance (pixi download cache, unused envs and images, leftovers of deleted instances) with sizes; you pick. Workspace and data folders are never touched.
 
@@ -96,7 +105,13 @@ ro = true
 [instance.pinhel]     # another workbench: only what differs
 port = 8890
 profile = "kitchen"
+
+[gdl]                 # the manager itself (GDL Settings)
+runtime = "podman"    # "" = auto
+theme = "nord"
 ```
+
+Where pixi puts environments isn't in this file: it is pixi's own `detached-environments` in `.pixi/config.toml`, so it works before the manager can start.
 
 A `.geodatalab` file from the old `geodatalab.sh` is converted automatically on first run, and the old file is kept as `.geodatalab.bak`.
 
@@ -179,7 +194,7 @@ The `requirements/*.txt` files list what goes in. The lock files pin exact versi
 | `JUPYTER_TOKEN` | Fixed auth token (unset = auto-generated) |
 | `GDL_INSTANCE` | Same as `-i <name>` |
 | `GDL_BACKEND` | One-off backend override |
-| `GDL_RUNTIME` | `podman` or `docker` (default: podman if installed, else docker) |
+| `GDL_RUNTIME` | `podman` or `docker` for this run (overrides GDL Settings; default: podman if installed, else docker) |
 | `GDL_BIND` | pixi: listen address (default `127.0.0.1`) |
 | `GDL_CONFIG` | Use another settings file |
 

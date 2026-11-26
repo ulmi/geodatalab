@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -207,6 +208,172 @@ class TestRender(Base):
             render.build_root(i)
 
 
+class TestGdlSettings(Base):
+    def test_gdl_table_is_not_an_instance(self):
+        s = Settings(self.toml)
+        s.new_instance("default")
+        s.set_gdl(runtime="docker")
+        text = self.toml.read_text()
+        self.assertIn("[gdl]", text)
+        self.assertNotIn("theme", text)                  # defaults are not written
+        s2 = Settings(self.toml)
+        self.assertEqual((s2.gdl["runtime"], s2.gdl["theme"]), ("docker", "gruvbox"))
+        self.assertEqual(s2.names(), ["default"])
+        self.assertNotIn("runtime", s2.base)
+        s2.remove_instance("default")                    # deleting every instance keeps [gdl]
+        self.assertEqual((Settings(self.toml).names(), Settings(self.toml).gdl["runtime"]), ([], "docker"))
+        with self.assertRaises(KeyError):
+            s2.set_gdl(nope=1)
+
+    def test_runtime_setting_is_used(self):
+        from gdl import backends
+        Settings(self.toml).set_gdl(runtime="docker")
+        backends.reset_runtime()
+        self.addCleanup(backends.reset_runtime)
+        os.environ.pop("GDL_RUNTIME", None)
+        tried = []
+        with mock.patch("gdl.backends.shutil.which", lambda rt: tried.append(rt) or None):
+            with self.assertRaises(GdlError):
+                backends.detect_runtime()
+        self.assertEqual(tried, ["docker"])              # not podman first
+
+
+class TestPixiLocation(Base):
+    """pixi's detached-environments, written to the checkout and to own env projects."""
+    def setUp(self):
+        super().setUp()
+        from gdl import backends, recipe
+        from gdl.backends import Pixi
+        from gdl.config import pixi_env_location
+        self.co = self.tmp / "checkout"
+        self.co.mkdir()
+        cache = self.tmp / "cache"
+
+        def prefixes(cls, manifest):  # what `pixi info` would answer
+            loc = pixi_env_location(manifest.parent)
+            base = cache / "envs" if loc == "cache" else manifest.parent / ".pixi" / "envs"
+            return {"default": base / "default", "lab": base / "lab"}
+        for p in (mock.patch.object(backends, "ROOT", self.co), mock.patch.object(recipe, "ROOT", self.co),
+                  mock.patch.object(Pixi, "MANIFEST", self.co / "pixi.toml"),
+                  mock.patch.object(Pixi, "env_prefixes", classmethod(prefixes)),
+                  mock.patch.object(backends, "noexec", lambda path: False)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.Pixi = Pixi
+        self.s = Settings(self.toml)
+        self.s.new_instance("default")
+        self.s.update(self.s.get("default"), backend="pixi", profile="lab")
+
+    def test_move_to_cache_and_back(self):
+        from gdl import recipe
+        cfg = self.co / ".pixi" / "config.toml"
+        (self.co / ".pixi" / "envs").mkdir(parents=True)
+        self.assertEqual(self.Pixi.location(), "")
+        recipe.write_env_project(self.s.get("default"), "M\n", "L\n")  # an own env project
+        lines = []
+        self.Pixi.set_location(self.s, "cache", lines.append)
+        self.assertEqual(cfg.read_text().strip(), "detached-environments = true")
+        own_cfg = self.tmp / ".gdl" / "default" / "env" / ".pixi" / "config.toml"
+        self.assertIn("detached-environments = true", own_cfg.read_text())
+        self.assertEqual(self.Pixi.envs_dir(), self.tmp / "cache" / "envs")
+        old = (self.tmp / ".gdl" / "old-pixi-envs").read_text().splitlines()
+        self.assertEqual(old, [str(self.co / ".pixi" / "envs")])   # for Free space
+        self.assertTrue(any("Build" in ln for ln in lines))
+        # back into the checkout: the key goes, the file too (nothing else in it)
+        self.Pixi.set_location(self.s, "", lines.append)
+        self.assertFalse(cfg.exists())
+        self.assertNotIn(str(self.co / ".pixi" / "envs"),
+                         (self.tmp / ".gdl" / "old-pixi-envs").read_text())  # in use again
+
+    def test_cleaner_removes_old_location(self):
+        from gdl import cleanup
+        wrapper = self.tmp / "cache" / "envs" / "geodatalab-123"
+        (wrapper / "envs" / "lab" / "bin").mkdir(parents=True)
+        (wrapper / ".gitignore").write_text("*")
+        (self.tmp / ".gdl").mkdir(exist_ok=True)
+        (self.tmp / ".gdl" / "old-pixi-envs").write_text(f"{wrapper / 'envs'}\n")
+        with mock.patch.object(cleanup, "_runtime", lambda: None), \
+             mock.patch.object(cleanup.Pixi, "exe", staticmethod(lambda: "/nonexistent/pixi")):
+            items = cleanup.reclaimable(self.s)
+        item = next(i for i in items if "old location" in i.label)
+        item.action(lambda _: None)
+        self.assertFalse(wrapper.exists())               # envs and pixi's empty wrapper
+        checkout_envs = self.co / ".pixi" / "envs"
+        (checkout_envs / "lab").mkdir(parents=True)
+        cleanup.remove_env_dir(checkout_envs)
+        self.assertTrue((self.co / ".pixi").exists())    # the checkout's .pixi stays
+
+    def test_import_inherits_location(self):
+        from gdl import recipe
+        from gdl.config import pixi_env_location, write_pixi_env_location
+        write_pixi_env_location("/fast/envs", self.co)
+        d = recipe.write_env_project(self.s.get("default"), "M\n", "L\n")
+        self.assertEqual(pixi_env_location(d), "/fast/envs")
+
+    def test_keeps_other_pixi_settings(self):
+        from gdl.config import pixi_env_location, write_pixi_env_location
+        cfg = self.co / ".pixi" / "config.toml"
+        cfg.parent.mkdir()
+        cfg.write_text('run-post-link-scripts = "insecure"\n')
+        write_pixi_env_location("cache", self.co)
+        write_pixi_env_location("", self.co)
+        self.assertEqual(cfg.read_text().strip(), 'run-post-link-scripts = "insecure"')
+        self.assertEqual(pixi_env_location(self.co), "")
+
+    def test_refusals(self):
+        from gdl import backends
+        with self.assertRaises(GdlError):
+            self.Pixi.set_location(self.s, "relative/dir", lambda _: None)
+        with mock.patch.object(backends, "noexec", lambda path: True):
+            with self.assertRaisesRegex(GdlError, "noexec"):
+                self.Pixi.set_location(self.s, str(self.tmp / "x"), lambda _: None)
+        with mock.patch.object(self.Pixi, "is_running", lambda be: True):
+            with self.assertRaisesRegex(GdlError, "Stop default"):
+                self.Pixi.set_location(self.s, "cache", lambda _: None)
+        self.assertEqual(self.Pixi.location(), "")
+
+    def test_prefix_falls_back_without_pixi(self):
+        from gdl.backends import Pixi
+        with mock.patch.object(Pixi, "env_prefixes", classmethod(lambda cls, m: {})):
+            be = Pixi(self.s, self.s.get("default"))
+            self.assertEqual(be.prefix(), self.co / ".pixi" / "envs" / "lab")
+
+
+class TestContainerImage(Base):
+    """Start only from an image built for the instance's profile."""
+    def start(self, tag: str, images: dict[str, str]):
+        from gdl.backends import Container
+        s = Settings(self.toml)
+        if not s.exists:
+            s.new_instance("default")
+        inst = s.update(s.get("default"), backend="container", profile="kitchen", image_tag=tag,
+                        workspace=str(self.tmp / "ws"))
+        be = Container(s, inst)
+        with mock.patch.object(Container, "is_running", lambda be: False), \
+             mock.patch.object(Container, "_guard_foreign", lambda be: None), \
+             mock.patch.object(Container, "ensure_network", lambda be, out: None), \
+             mock.patch.object(Container, "image_profile", lambda be, img: images.get(img)), \
+             mock.patch.object(Container, "_run_compose") as compose, \
+             mock.patch.object(Container, "_wait", lambda be, out: None):
+            be.start(lambda _: None)
+        return be, compose
+
+    def test_own_tag(self):
+        be, compose = self.start("2026.11-kitchen", {"geodatalab:2026.11-kitchen": "kitchen"})
+        compose.assert_called_once()
+
+    def test_falls_back_to_latest_of_same_profile(self):
+        be, compose = self.start("2026.11-kitchen", {"geodatalab:latest": "kitchen"})
+        self.assertEqual(be.inst.image_tag, "")
+        compose.assert_called_once()
+
+    def test_refuses_latest_of_another_profile(self):
+        with self.assertRaisesRegex(GdlError, "No 'kitchen' image"):
+            self.start("2026.11-kitchen", {"geodatalab:latest": "lab"})
+        with self.assertRaisesRegex(GdlError, "'lab' image, but this instance is 'kitchen'"):
+            self.start("", {"geodatalab:latest": "lab"})   # e.g. right after switching from pixi
+
+
 class TestServices(Base):
     def setUp(self):
         super().setUp()
@@ -247,7 +414,7 @@ class TestServices(Base):
         f = render.compose_fragment(db)
         for want in ['image: "docker.io/postgis/postgis:17-3.5"', 'container_name: "geodatalab-gisdb"',
                      '- "127.0.0.1:5432:5432"', 'shm_size: "1g"', 'aliases: ["gisdb"]',
-                     'test: ["CMD-SHELL", "pg_isready -U gis -d gis"]',
+                     'test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U gis -d gis"]',
                      'name: "geodatalab-gisdb-data"', 'target: "/var/lib/postgresql/data"',
                      '- "POSTGRES_PASSWORD=pa$$$$"',  # $ escaped for compose
                      'name: "geodatalab"', "external: true"]:
@@ -381,6 +548,92 @@ class TestTui(Base):
                 await app.workers.wait_for_complete()
                 await pilot.pause()
                 self.assertIn("No instances yet", str(app.query_one("#overview", Static).render()))
+        asyncio.run(go())
+
+    def test_tabs_and_gdl_settings(self):
+        import asyncio
+        from textual.widgets import Collapsible, Select, Static, TabbedContent
+        from gdl.backends import Pixi
+        from gdl.tui import GeodatalabApp
+        for p in (mock.patch.object(Pixi, "installed", lambda self: False),
+                  mock.patch.object(Pixi, "location", staticmethod(lambda: "")),
+                  mock.patch.object(Pixi, "envs_dir", classmethod(lambda cls: self.tmp / "envs"))):
+            p.start()
+            self.addCleanup(p.stop)
+        s = Settings(self.toml)
+        s.new_instance("default")
+        s.update(s.get("default"), backend="pixi")
+
+        async def go():
+            app = GeodatalabApp()
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                tabs = [t.id for t in app.query_one("#tabs", TabbedContent).query("TabPane")]
+                self.assertEqual(tabs, ["tab-overview", "tab-monitor", "tab-settings",
+                                        "tab-tools", "tab-activity", "tab-gdl"])        # GDL Settings far right
+                # Monitor: notebooks open, processes and log folded; the log follows only when open
+                self.assertFalse(app.query_one("#c-kernels", Collapsible).collapsed)
+                self.assertTrue(app.query_one("#c-procs", Collapsible).collapsed)
+                self.assertTrue(app.query_one("#c-log", Collapsible).collapsed)
+                with mock.patch.object(type(app), "follow") as follow:
+                    app.action_follow()                                   # f: Monitor tab, log open
+                    await pilot.pause()
+                    self.assertEqual(app.query_one("#tabs", TabbedContent).active, "tab-monitor")
+                    self.assertFalse(app.query_one("#c-log", Collapsible).collapsed)
+                    self.assertTrue(follow.called)
+                    app.stop_following()
+                self.assertTrue(app.query_one("#c-data", Collapsible).collapsed)       # Data lives in Settings
+                # paint a running instance's sample (graphs, labels, tables) — and a stopped one
+                from gdl.monitor import Sample
+                kid = "352bcffd-b3ae-40a7-bedd-da0573a8d894"
+                app.monitor.cpu["default"] = [50.0, 450.0]
+                app.monitor.mem["default"] = [300 * 2**20, 400 * 2**20]
+                proc = {"pid": 7, "ppid": 1, "cpu": 450.0, "rss": 400 * 2**20, "threads": 9,
+                        "cmd": "python -m ipykernel_launcher -f kernel-%s.json" % kid, "kernel": kid}
+                running = Sample(cpu=450.0, rss=400 * 2**20, mem_limit=50 * 2**30, cores=12, running=True,
+                                 procs=[proc], kernels=[{"id": kid, "path": "a.ipynb", "state": "background",
+                                                         "cpu": 450.0, "rss": 400 * 2**20, "procs": 1,
+                                                         "threads": 9, "pid": 7}])
+                app.paint_monitor("default", running)
+                await pilot.pause()
+                self.assertIn("4.5 cores", str(app.query_one("#m-cpu-label", Static).render()))
+                self.assertIn("of 50.0 GB", str(app.query_one("#m-mem-label", Static).render()))
+                self.assertEqual(app.query_one("#m-kernels").row_count, 1)
+                running.cpu_limit = 4.0                                   # a container with cpus = 4
+                app.paint_monitor("default", running)
+                await pilot.pause()
+                self.assertIn("of 4 (limit)", str(app.query_one("#m-cpu-label", Static).render()))
+                # Start/Restart refuse while Settings has typed-but-unsaved changes
+                from textual.widgets import Input
+                with mock.patch.object(type(app), "op") as op:
+                    app.query_one("#f-cpus", Input).value = "4"
+                    self.assertEqual(app.unsaved(), ["cpus"])
+                    app.action_restart()
+                    op.assert_not_called()
+                    app.save()
+                    self.assertEqual((app.unsaved(), Settings(self.toml).get("default").cpus), ([], "4"))
+                    app.action_restart()
+                    op.assert_called_once_with("Restart", "restart")
+                app.paint_monitor("default", Sample(note="Not running."))
+                await pilot.pause()
+                self.assertEqual(app.query_one("#m-kernels").row_count, 0)
+                self.assertTrue(app.query_one("#limits", Collapsible).collapsed)       # no limits set
+                self.assertFalse(app.query_one("#g-folder").display)                   # only for a custom folder
+                app.query_one("#g-location", Select).value = "folder"
+                await pilot.pause()
+                self.assertTrue(app.query_one("#g-folder").display)
+                # theme + runtime are saved to [gdl]; the location stays (not changed)
+                app.query_one("#g-location", Select).value = "checkout"
+                app.query_one("#g-theme", Select).value = "nord"
+                app.query_one("#g-runtime", Select).value = "podman"
+                app.save_gdl_settings()
+                await pilot.pause()
+                self.assertEqual((app.theme, Settings(self.toml).gdl["runtime"]), ("nord", "podman"))
+                # limits open by themselves once one is set
+                app.settings.update(app.inst, memory="8G")
+                app.show_instance()
+                await pilot.pause()
+                self.assertFalse(app.query_one("#limits", Collapsible).collapsed)
         asyncio.run(go())
 
 
@@ -642,6 +895,87 @@ class TestRecipe(Base):
 
 
 class TestMonitor(unittest.TestCase):
+    def test_probe_counts_short_lived_children(self):
+        """CPU of children that start and exit within the interval still counts (the
+        parent's reaped-children time), and new processes count from their start."""
+        import subprocess
+        from gdl.probe import snapshot
+        burn = "import subprocess, sys, time\nt = time.time()\nwhile time.time() - t < 3:\n" \
+               "    subprocess.run([sys.executable, '-c', 'import time\\nt=time.time()\\nwhile time.time()-t<0.2: pass'])"
+        parent = subprocess.Popen([sys.executable, "-c", burn])
+        try:
+            time.sleep(0.5)
+            snap = snapshot(parent.pid, interval=1.0)
+        finally:
+            parent.kill(); parent.wait()
+        total = sum(p["cpu"] for p in snap["procs"])
+        self.assertGreater(total, 50)       # ~100 % of one core, though each child lives 0.2 s
+        self.assertLess(total, 400)         # and no spike from a child's lifetime landing at once
+
+    def test_probes_skip_each_other(self):
+        import subprocess
+        from gdl.probe import snapshot
+        other = subprocess.Popen([sys.executable, "-c", "while True: pass", "gdl-probe"])
+        try:
+            time.sleep(0.3)
+            snap = snapshot(None, interval=0.3)
+        finally:
+            other.kill(); other.wait()
+        self.assertNotIn(other.pid, [p["pid"] for p in snap["procs"]])
+
+    def test_kernel_tree_and_background(self):
+        from gdl import monitor
+        kid = "352bcffd-b3ae-40a7-bedd-da0573a8d894"
+        procs = [{"pid": 10, "ppid": 1, "cpu": 0.0, "rss": 100, "threads": 3, "kernel": ""},       # jupyter
+                 {"pid": 20, "ppid": 10, "cpu": 2.0, "rss": 200, "threads": 9, "kernel": kid},     # kernel
+                 {"pid": 21, "ppid": 20, "cpu": 99.0, "rss": 50, "threads": 1, "kernel": kid},     # forked worker
+                 {"pid": 22, "ppid": 20, "cpu": 98.0, "rss": 50, "threads": 1, "kernel": kid}]
+        be = mock.Mock()
+        be.inst.name, be.inst.port = "x", 8888
+        with mock.patch.object(monitor, "sessions", lambda port, token: {kid: {"path": "a.ipynb", "state": "idle"}}):
+            [k] = monitor.Monitor()._kernels(be, procs)
+        self.assertEqual((k["pid"], k["procs"], k["threads"], round(k["cpu"])), (20, 3, 11, 199))
+        self.assertEqual(k["state"], "background")   # Jupyter says idle, its tree is working
+
+    def test_cpu_eases(self):
+        from gdl import monitor
+        be = mock.Mock()
+        be.inst.name, be.inst.is_service, be.inst.mode = "x", False, "idle"
+        be.is_running.return_value = True
+        m = monitor.Monitor()
+        out = []
+        for raw in (0.0, 0.0, 400.0, 0.0, 0.0, 600.0, 600.0, 600.0, 600.0, 600.0):
+            with mock.patch.object(monitor.Monitor, "_probe", lambda self, be, raw=raw:
+                                   monitor.Sample(cpu=-1, procs=[{"pid": 1, "cpu": raw, "rss": 1}])):
+                out.append(m.sample(be).cpu)
+        self.assertLess(out[2], 200)          # a one-sample blip stays small
+        self.assertLess(out[4], out[2])       # and fades
+        self.assertGreater(out[-1], 500)      # sustained load gets there
+        self.assertEqual(m.history("x")[0], out)
+
+    def test_braille(self):
+        from gdl.monitor import braille
+        g = braille([0, 100, 50, 100], width=2, height=2, top=100)
+        lines = g.plain.split("\n")
+        self.assertEqual([len(x) for x in lines], [2, 2])
+        self.assertEqual(lines[0], "⢸⢸")             # top row: only the full (100) columns reach it
+        self.assertEqual(lines[1], "⢸⣿")
+        self.assertEqual(braille([], 3, 1, 100).plain, "   ")
+        self.assertEqual({s.style for s in braille([100] * 4, 2, 2, 100, "green").spans}, {"green"})
+
+    def test_memory_scaled_to_limit(self):
+        from gdl.monitor import braille
+        MB, GB = 2**20, 2**30
+        top = 50 * GB                                               # RAM, or the container's limit
+        dots = lambda v, **kw: sum(bin(ord(c) - 0x2800).count("1")
+                                   for c in braille([v, v], 1, 5, top, **kw).plain if c.strip()) // 2
+        self.assertEqual(dots(300 * MB), 0)                         # plain rounding: invisible
+        self.assertEqual(dots(300 * MB, min_dot=True), 1)           # memory: at least one dot
+        self.assertEqual(dots(0, min_dot=True), 1)                  # a running idle instance: the floor
+        self.assertEqual(braille([], 2, 1, top, min_dot=True).plain, "  ")   # no samples: blank
+        self.assertEqual(dots(25 * GB, min_dot=True), 10)           # half the limit = half the height
+        self.assertEqual(dots(50 * GB, min_dot=True), 20)
+
     def test_sizes(self):
         from gdl.monitor import human, parse_size
         self.assertEqual(parse_size("12MiB"), 12 * 2**20)
