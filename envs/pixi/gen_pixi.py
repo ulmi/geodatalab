@@ -37,7 +37,9 @@ ONLY_ON = {
 }
 
 # The manager (gdl/ package): default environment + tasks
-MANAGER = ["textual", "tomli-w"]
+MANAGER = ["textual", "tomli-w", "psutil"]
+# Clipboard tool for "Copy URL": VTE terminals (GNOME/Mint) ignore OSC 52
+MANAGER_LINUX = ["xclip"]
 TASKS = {
     "gdl": "python -m gdl",
     "start": "python -m gdl start",
@@ -51,6 +53,8 @@ TASKS = {
     "logs": "python -m gdl logs",
     "shell": "python -m gdl shell",
     "render": "python -m gdl render",
+    "export": "python -m gdl export",
+    "import": "python -m gdl import",
     "test": "python -m unittest discover -s tests -v",
 }
 
@@ -154,6 +158,7 @@ def render() -> str:
         'pip = "*"',
     ]
     lines += ["", "[feature.manager.dependencies]", *(f'{m} = "*"' for m in MANAGER)]
+    lines += ["", "[feature.manager.target.linux-64.dependencies]", *(f'{m} = "*"' for m in MANAGER_LINUX)]
     lines += ["", "[feature.manager.tasks]", *(f'{k} = "{v}"' for k, v in TASKS.items())]
     envs = ['default = { features = ["manager"] }']
     for profile in PROFILES:

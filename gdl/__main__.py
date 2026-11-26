@@ -3,6 +3,8 @@
     start | stop | restart | status | url | open | logs | shell | update
     build [--profile P] [--no-cache]   lock [PROFILE ...]   clean [--images]
     render   (regenerate .gdl/<instance>/compose.data.yml, used by .devcontainer)
+    export [FILE] [--label TEXT]          the instance's env as a recipe (default ~/<instance>.gdlenv.toml)
+    import FILE [--name N] [--workspace DIR] [--data NAME=PATH ...]   a new instance from a recipe
 Any command takes -i NAME for a named instance (or GDL_INSTANCE=NAME).
 """
 from __future__ import annotations
@@ -18,7 +20,7 @@ from .config import PROFILES, GdlError, Settings, migrate_legacy
 from .render import service_urls, write_fragment
 
 COMMANDS = ["start", "stop", "restart", "status", "url", "open", "logs", "shell",
-            "update", "build", "lock", "clean", "render"]
+            "update", "build", "lock", "clean", "render", "export", "import"]
 
 
 def say(msg: str, color: str = "32") -> None:
@@ -35,6 +37,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--profile", choices=list(PROFILES))
     ap.add_argument("--no-cache", action="store_true")
     ap.add_argument("--images", action="store_true", help="clean: also remove all geodatalab images")
+    ap.add_argument("--label", default="", help="export: a note stored in the recipe")
+    ap.add_argument("--name", help="import: instance name (default: the recipe's)")
+    ap.add_argument("--workspace", help="import: workspace folder (default ~/geodatalab)")
+    ap.add_argument("--data", action="append", default=[], metavar="NAME=PATH",
+                    help="import: path for a data folder named in the recipe (repeatable)")
     a = ap.parse_args(argv)
 
     if sys.platform == "win32":
@@ -66,6 +73,8 @@ def run(a: argparse.Namespace) -> int:
         except GdlError:
             pass  # no container runtime here
         return 0
+    if a.command == "import":
+        return import_cmd(settings, a)
     if not settings.exists:
         raise GdlError("No geodatalab.toml yet. Run `pixi run gdl` to set up, "
                        "or copy geodatalab.example.toml.")
@@ -116,10 +125,32 @@ def run(a: argparse.Namespace) -> int:
             be.lock(out, a.args or [inst.profile])
         case "update":
             be.update(out)
+        case "export":
+            from pathlib import Path
+            from .recipe import export_recipe
+            path = export_recipe(inst, Path(a.args[0]) if a.args else Path.home(), a.label)
+            say(f"Exported the env of '{inst.name}' to {path}")
         case "clean":
             if input(f"Remove {inst.backend} resources of '{inst.name}'"
                      f"{' and ALL geodatalab images' if a.images else ''}? [y/N] ").lower() == "y":
                 be.clean(out, images=a.images)
+    return 0
+
+
+def import_cmd(settings: Settings, a: argparse.Namespace) -> int:
+    from pathlib import Path
+    from .recipe import Recipe, import_recipe
+    if not a.args:
+        raise GdlError("Usage: gdl import FILE [--name N] [--workspace DIR] [--data NAME=PATH ...]")
+    r = Recipe.load(Path(a.args[0]).expanduser())
+    paths = dict(d.split("=", 1) for d in a.data if "=" in d)
+    name = a.name or r.name
+    inst = import_recipe(settings, r, name, a.workspace or str(Path.home() / "geodatalab"), paths)
+    say(f"Created '{name}' from the recipe ({r.summary()}).")
+    for d in r.data:
+        if d["name"] not in paths:
+            say(f"Data folder '{d['name']}' skipped (no --data {d['name']}=PATH); add it later in the Data tab.", "33")
+    say(f"Build it: pixi run gdl -i {name} build", "34")
     return 0
 
 

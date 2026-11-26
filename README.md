@@ -38,7 +38,7 @@ The manager opens on an empty list. Press **n** (or **New instance…**) to star
 ## The manager
 
 ```
-┌ Instances ───────────────┐┌ Overview │ Settings │ Data │ Log ───────────────┐
+┌ Instances ───────────────┐┌ Overview │ Monitor │ Logs │ Settings │ Data │ … ┐
 │ default  pixi       8888 ││ default   pixi · kitchen · mode lab · port 8888 │
 │ pinhel   container  8890 ││ State:      healthy                             │
 │                          ││ URL:        http://localhost:8888/lab?token=…   │
@@ -47,11 +47,27 @@ The manager opens on an empty list. Press **n** (or **New instance…**) to star
 ```
 
 - **Overview:** state, URL and folders of the selected instance.
+- **Monitor:** live CPU and memory, which notebooks are running (idle/busy, CPU, memory) and the processes behind them.
 - **Settings:** backend, profile, mode, port, workspace, start folder and container limits.
 - **Data:** add or remove data folders, toggle read-only, choose where Jupyter opens.
-- **Log:** output of builds and other jobs, and the workbench log (**f**).
+- **Logs:** the selected instance's workbench log, live while the tab is open (**f** jumps there).
+- **GDL Tools:** Free disk space (shortcut **k**): pixi cache, unused envs and images, leftovers of deleted instances — you pick.
+- **GDL Activity:** what the manager itself does: builds, locks, deletes, clean-ups.
+
+**Delete** (**d**) removes the instance together with its files: its pixi env or container image (unless another instance shares it), a service's data volume, and `.gdl/<name>`. Tick *Keep these files on disk* to only forget the instance. **Free disk space** (GDL Tools tab, or **k**) lists what can go without affecting any instance (pixi download cache, unused envs and images, leftovers of deleted instances) with sizes; you pick. Workspace and data folders are never touched.
 
 Jupyter keeps running after you quit the manager.
+
+### Moving an environment to another machine
+
+**Export recipe…** (Overview, or **e**) saves the selected workbench's environment as one plain-text file, `~/<name>.gdlenv.toml`: its settings and the exact version of every package (no data, no machine paths). On the other machine: **n** → *From a recipe file*, pick the file, fill in the workspace and a path for each data folder it names; the manager builds the same environment from it. The imported instance gets its own environment, so other instances there are not affected.
+
+```bash
+pixi run export ~/pinhel.gdlenv.toml                     # scripting: export the default instance
+pixi run import ~/pinhel.gdlenv.toml --name pinhel --workspace ~/work --data ccdrn=/media/disk/CCDRN
+```
+
+For a container workbench the recipe carries the image tag; the other machine rebuilds it from the same locks.
 
 For scripts, the same operations are pixi tasks:
 
@@ -113,7 +129,7 @@ gdf.to_postgis("parcels", eng)            # psycopg2 + GeoAlchemy2 are in every 
 ```
 
 - **Settings** sets the image, port, environment and `shm_size` (PostGIS starts with 1 GB instead of Docker's 64 MB). The password is generated per instance.
-- Data lives in a named volume (`geodatalab-<name>-data`). Deleting the instance keeps it; **Clean** (`k`) removes it.
+- Data lives in a named volume (`geodatalab-<name>-data`). Deleting the instance removes it too, unless you tick *Keep these files on disk*; a kept volume shows up later under **Free disk space** (GDL Tools).
 - **Shell** (`h`) opens `psql`. **Update** (`u`) pulls a newer image.
 - Works with Docker and Podman. Your own templates go in `templates.d/`, which isn't committed.
 

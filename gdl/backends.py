@@ -103,10 +103,12 @@ def kill_tree(pid: int) -> None:
             time.sleep(0.25)
 
 
-def follow_file(path: Path, out: Out, stop: threading.Event, lines: int = 50) -> None:
+def follow_file(path: Path, out: Out, stop: threading.Event, lines: int = 200) -> None:
     if not path.exists():
-        out("No log yet.")
-        return
+        out("No log yet — it appears when the instance starts.")
+        while not path.exists():
+            if stop.wait(1):
+                return
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f.readlines()[-lines:]:
             out(line.rstrip("\n"))
@@ -425,8 +427,24 @@ class Pixi(Backend):
             raise GdlError("pixi not found — install it from https://pixi.sh")
         return exe
 
-    def px(self, sub: str, *args: str) -> list[str]:
-        return [self.exe(), sub, "--manifest-path", str(self.MANIFEST), *args]
+    def px(self, sub: str, *args: str, manifest: Path | None = None) -> list[str]:
+        return [self.exe(), sub, "--manifest-path", str(manifest or self.MANIFEST), *args]
+
+    # An instance runs on its profile's shared env (root pixi.toml, env = profile)
+    # or on its own env project .gdl/<instance>/env/ (env "default"), see recipe.py.
+    @staticmethod
+    def own_project(inst: Instance) -> Path:
+        return inst.state_dir / "env"
+
+    def owns_env(self, inst: Instance | None = None) -> bool:
+        return (self.own_project(inst or self.inst) / "pixi.toml").exists()
+
+    def project(self, inst: Instance | None = None) -> tuple[Path, str]:
+        """(manifest, environment name) the instance runs on."""
+        inst = inst or self.inst
+        if self.owns_env(inst):
+            return self.own_project(inst) / "pixi.toml", "default"
+        return self.MANIFEST, inst.env_name
 
     @staticmethod
     def clean_env(extra: dict | None = None) -> dict:
@@ -436,7 +454,8 @@ class Pixi(Backend):
         return {**env, **(extra or {})}
 
     def prefix(self, inst: Instance | None = None) -> Path:
-        return ROOT / ".pixi" / "envs" / (inst or self.inst).env_name
+        manifest, env = self.project(inst)
+        return manifest.parent / ".pixi" / "envs" / env
 
     def installed(self) -> bool:
         p = self.prefix()
@@ -452,7 +471,7 @@ class Pixi(Backend):
             return None
 
     def label(self):
-        return f"pixi:{self.inst.env_name}"
+        return f"pixi:{self.inst.name} (own env)" if self.owns_env() else f"pixi:{self.inst.env_name}"
 
     def is_running(self):
         pid = self._pid()
@@ -468,7 +487,8 @@ class Pixi(Backend):
         env = dataclasses.replace(self.inst, profile=profile).env_name
         for n in self.settings.names():
             other = self.settings.get(n)
-            if other.backend == "pixi" and other.env_name == env and Pixi(self.settings, other).is_running():
+            be = Pixi(self.settings, other)
+            if other.backend == "pixi" and other.env_name == env and not be.owns_env() and be.is_running():
                 raise GdlError(f"Instance '{n}' is running from the '{env}' environment. Stop it first.")
 
     def _gen(self):
@@ -478,6 +498,11 @@ class Pixi(Backend):
         return mod
 
     def lock(self, out, profiles):
+        if self.owns_env():
+            out(f"Re-solving the own env of '{self.inst.name}' to the latest versions ...")
+            run(self.px("update", manifest=self.project()[0]), out, env=self.clean_env())
+            out("Wrote its pixi.lock")
+            return
         self._gen().main([])
         if len(profiles) >= len(PROFILES) or not self.LOCK.exists():
             out("Solving all environments → pixi.lock ...")
@@ -494,8 +519,9 @@ class Pixi(Backend):
         here = {("linux", "x86_64"): "linux-64", ("linux", "aarch64"): "linux-aarch64",
                 ("darwin", "arm64"): "osx-arm64", ("darwin", "x86_64"): "osx-64",
                 ("win32", "amd64"): "win-64"}.get((sys.platform, m), f"{sys.platform}-{m}")
-        manifest = tomllib.loads(self.MANIFEST.read_text(encoding="utf-8"))
-        plats = (manifest.get("feature", {}).get(inst.env_name, {}).get("platforms")
+        path, env = self.project(inst)
+        manifest = tomllib.loads(path.read_text(encoding="utf-8"))
+        plats = (manifest.get("feature", {}).get(env, {}).get("platforms")
                  or manifest["workspace"]["platforms"])
         if here not in plats:
             raise GdlError(f"Profile '{inst.profile}' is not available on pixi for {here} "
@@ -503,6 +529,13 @@ class Pixi(Backend):
 
     def build(self, out, profile=None, no_cache=False):
         profile = profile or self.inst.profile
+        if self.owns_env():
+            origin = (self.own_project(self.inst) / "profile").read_text().strip() \
+                if (self.own_project(self.inst) / "profile").exists() else profile
+            if origin == profile:
+                return self._build_own(out)
+            out(f"Profile changed ({origin} → {profile}): back to the shared '{profile}' env.")
+            shutil.rmtree(self.own_project(self.inst))
         self._check_platform(dataclasses.replace(self.inst, profile=profile))
         self._guard_env(profile)
         if profile in ("lab", "institute"):
@@ -517,8 +550,17 @@ class Pixi(Backend):
         self.settings.update(self.inst, profile=profile)
         out(f"Environment ready: {self.prefix(target)}")
 
+    def _build_own(self, out):
+        self._check_platform(self.inst)
+        manifest, env = self.project()
+        out(f"Installing the own env of '{self.inst.name}' from its pixi.lock ...")
+        run(self.px("install", "--locked", manifest=manifest), out, env=self.clean_env())
+        self._post_install(out, self.inst)
+        out(f"Environment ready: {self.prefix()}")
+
     def _in_env(self, inst: Instance, *cmd: str) -> list[str]:
-        return self.px("run", "--frozen", "-e", inst.env_name, *cmd)
+        manifest, env = self.project(inst)
+        return self.px("run", "--frozen", "-e", env, *cmd, manifest=manifest)
 
     def _post_install(self, out, inst):
         bridge = ("import pathlib, shutil, subprocess, sys, sysconfig\n"
@@ -598,7 +640,8 @@ class Pixi(Backend):
             raise GdlError("Environment not installed. Build it first.")
         ensure_workspace(self.inst, lambda _: None)
         root, _ = build_root(self.inst)
-        return (self.px("shell", "--frozen", "-e", self.inst.env_name),
+        manifest, env = self.project()
+        return (self.px("shell", "--frozen", "-e", env, manifest=manifest),
                 self.clean_env(gdl_env(self.inst, str(root), service_urls(self.settings, internal=False))),
                 root / "workspace")
 
@@ -607,7 +650,8 @@ class Pixi(Backend):
         return tf.read_text().strip() if self.is_running() and tf.exists() else ""
 
     def status(self):
-        lines = [f"Env:      {self.inst.env_name}  "
+        name = f"own ({self.inst.profile})" if self.owns_env() else self.inst.env_name
+        lines = [f"Env:      {name}  "
                  + (str(self.prefix()) if self.installed() else "(not installed — build it)"),
                  f"Root:     {self.inst.state_dir / 'root'}",
                  f"Log:      {self._f('jupyter.log')}",
@@ -620,6 +664,10 @@ class Pixi(Backend):
     def clean(self, out, images=False):
         if self.is_running():
             self.stop(out)
+        if self.owns_env():
+            run(self.px("clean", manifest=self.project()[0]), out, env=self.clean_env())
+            out(f"Removed the own env of '{self.inst.name}' (its recipe stays; Build reinstalls it).")
+            return
         self._guard_env(self.inst.profile)
         run(self.px("clean", "-e", self.inst.env_name), out, env=self.clean_env())
         out(f"Removed pixi environment '{self.inst.env_name}'.")

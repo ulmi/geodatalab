@@ -290,13 +290,28 @@ class TestTui(Base):
         from textual.widgets import Select, Static
         from gdl.tui import GeodatalabApp
 
+        from gdl.backends import Pixi
+        # never let this test touch a real env of the checkout
+        p = mock.patch.object(Pixi, "installed", lambda self: False)
+        p.start()
+        self.addCleanup(p.stop)
+
         async def go():
             app = GeodatalabApp()
             async with app.run_test(size=(120, 50)) as pilot:
                 await pilot.pause()
+                self.assertEqual(app.theme, "gruvbox")
                 # first open: main screen with a welcome, no forced dialog
                 self.assertEqual(type(app.screen).__name__, "Screen")
                 self.assertIn("No instances yet", str(app.query_one("#overview", Static).render()))
+                self.assertFalse(self.toml.exists())
+                # instance commands are disabled (greyed out), pressing them is harmless
+                self.assertIsNone(app.check_action("start", ()))
+                for key in "sxrochbludf":
+                    await pilot.press(key)
+                    await pilot.pause()
+                await app.workers.wait_for_complete()
+                self.assertTrue(app.is_running)
                 self.assertFalse(self.toml.exists())
 
                 # wizard: workbench (name suggested as "default"), step 1 → Enter → step 2 → Create
@@ -310,6 +325,7 @@ class TestTui(Base):
                 await pilot.pause()
                 d = Settings(self.toml).get("default")
                 self.assertEqual((d.kind, d.backend, d.profile, d.port), ("workbench", "pixi", "lab", 8888))
+                self.assertTrue(app.check_action("start", ()))
 
                 # a second workbench
                 await pilot.press("n")
@@ -352,7 +368,9 @@ class TestTui(Base):
                 for name in ("gisdb", "pinhel", "default"):
                     app.current = name
                     await pilot.press("d")
+                    await app.workers.wait_for_complete()
                     await pilot.pause()
+                    self.assertEqual(type(app.screen).__name__, "DeleteDialog")
                     await pilot.click("#ok")
                     await app.workers.wait_for_complete()
                     await pilot.pause()
@@ -364,6 +382,296 @@ class TestTui(Base):
                 await pilot.pause()
                 self.assertIn("No instances yet", str(app.query_one("#overview", Static).render()))
         asyncio.run(go())
+
+
+class TestCleanup(Base):
+    def setUp(self):
+        super().setUp()
+        from gdl.backends import Pixi
+        self.removed = []
+        for p in (mock.patch.object(Pixi, "installed", lambda be: True),
+                  mock.patch.object(Pixi, "prefix", lambda be, inst=None: be.inst.state_dir),
+                  mock.patch.object(Pixi, "clean", lambda be, out, images=False:
+                                    self.removed.append(be.inst.env_name))):
+            p.start()
+            self.addCleanup(p.stop)
+        self.s = Settings(self.toml)
+        self.s.new_instance("default")
+        self.s.update(self.s.get("default"), backend="pixi", profile="kitchen")
+
+    def test_delete_removes_env_by_default(self):
+        from gdl import cleanup
+        items, kept = cleanup.instance_files(self.s, self.s.get("default"))
+        self.assertEqual([i.label for i in items], ["Generated state", "pixi env kitchen"])
+        cleanup.delete_instance(self.s, "default", lambda _: None)
+        self.assertEqual(self.removed, ["kitchen"])
+        self.assertNotIn("default", Settings(self.toml).names())
+
+    def test_delete_can_keep_files(self):
+        from gdl import cleanup
+        (self.tmp / ".gdl" / "default").mkdir(parents=True)
+        cleanup.delete_instance(self.s, "default", lambda _: None, keep_files=True)
+        self.assertEqual(self.removed, [])
+        self.assertNotIn("default", Settings(self.toml).names())
+        kept = [d.name for d in (self.tmp / ".gdl").iterdir()]
+        self.assertTrue(len(kept) == 1 and kept[0].startswith("default.deleted-"))
+
+    def test_shared_env_is_kept(self):
+        from gdl import cleanup
+        self.s.new_instance("other")  # inherits pixi + kitchen
+        items, kept = cleanup.instance_files(self.s, self.s.get("default"))
+        self.assertEqual([i.label for i in items], ["Generated state"])
+        self.assertIn("used by other", kept[0])
+
+    def test_cleaner_lists_leftovers_and_unused_only(self):
+        from gdl import cleanup
+        root = self.tmp / ".gdl"
+        (root / "default").mkdir(parents=True)
+        (root / "gone").mkdir()
+        (root / "gone" / "x").write_text("x" * 5000)
+        with mock.patch.object(cleanup, "_runtime", lambda: None), \
+             mock.patch.object(cleanup.Pixi, "exe", staticmethod(lambda: "/nonexistent/pixi")):
+            items = cleanup.reclaimable(self.s)
+        labels = [i.label for i in items]
+        self.assertIn("Leftover files of deleted instance 'gone'", labels)
+        self.assertFalse(any("'default'" in label or "kitchen" in label for label in labels))
+        next(i for i in items if "gone" in i.label).action(lambda _: None)
+        self.assertFalse((root / "gone").exists())
+        self.assertTrue((root / "default").exists())
+
+
+LOCK = """version: 7
+platforms:
+- name: linux-64
+  virtual-packages:
+  - __unix=0
+- name: osx-arm64
+  virtual-packages:
+  - __osx=13.0
+environments:
+  default:
+    channels:
+    - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64:
+      - conda: https://x/linux-64/textual-1.conda
+  lab:
+    channels:
+    - url: https://conda.anaconda.org/conda-forge/
+    indexes:
+    - https://pypi.org/simple
+    packages:
+      linux-64:
+      - conda: https://x/linux-64/python-3.conda
+      - pypi: https://files/wbw-linux.whl
+packages:
+- conda: https://x/linux-64/python-3.conda
+  sha256: aaa
+  depends:
+  - libc
+- conda: https://x/linux-64/textual-1.conda
+  sha256: bbb
+- pypi: https://files/wbw-linux.whl
+  name: wbw
+  requires_python: '>=3.9'
+"""
+
+ROOT_MANIFEST = {
+    "workspace": {"name": "geodatalab", "channels": ["conda-forge"], "platforms": ["linux-64", "osx-arm64"]},
+    "dependencies": {"python": "3.13.*", "pip": "*"},
+    "feature": {"manager": {"dependencies": {"textual": "*"}},
+                "lab": {"platforms": ["linux-64"],
+                        "dependencies": {"gdal": "*", "ceres-solver": {"version": "*", "build": "cpu*"}},
+                        "pypi-dependencies": {"wbw": "*"}}},
+    "environments": {"default": {"features": ["manager"]}, "lab": {"features": ["lab"]}},
+}
+
+
+class TestRecipe(Base):
+    def test_extract_lock_keeps_only_that_env(self):
+        from gdl.recipe import extract_lock
+        out = extract_lock(LOCK, "lab")
+        self.assertIn("environments:\n  default:\n    channels:", out)
+        self.assertNotIn("textual", out)                 # other env's package dropped
+        self.assertNotIn("osx-arm64", out)               # platform the env isn't locked for dropped
+        self.assertIn("- pypi: https://files/wbw-linux.whl\n  name: wbw\n", out)
+        self.assertIn("  depends:\n  - libc\n", out)      # package bodies kept verbatim
+        with self.assertRaises(GdlError):
+            extract_lock(LOCK, "kitchen")
+
+    def test_env_manifest_flattens_features(self):
+        import tomllib
+        from gdl.recipe import env_manifest
+        m = tomllib.loads(env_manifest("lab", "pinhel", ROOT_MANIFEST))
+        self.assertEqual(m["workspace"], {"name": "pinhel", "channels": ["conda-forge"], "platforms": ["linux-64"]})
+        self.assertEqual(m["dependencies"]["python"], "3.13.*")
+        self.assertEqual(m["dependencies"]["ceres-solver"], {"version": "*", "build": "cpu*"})
+        self.assertEqual(m["pypi-dependencies"], {"wbw": "*"})
+        self.assertNotIn("environments", m)
+
+    def test_roundtrip(self):
+        from gdl.recipe import Recipe
+        r = Recipe(name="pinhel", settings={"backend": "pixi", "profile": "lab"},
+                   data=[{"name": "ccdrn", "ro": True}, {"name": "lidar", "ro": False}],
+                   manifest='[workspace]\nname = "x"\n', lock=LOCK + "  weird: 'a\\\\b' \"q\"\n")
+        back = Recipe.loads(r.dumps())
+        self.assertEqual(back, r)
+        self.assertIn("# geodatalab recipe", r.dumps())
+        with self.assertRaises(GdlError):
+            Recipe.loads("version = 99\n")
+
+    def test_capture_shared_and_own(self):
+        from gdl import recipe
+        s = Settings(self.toml)
+        s.new_instance("default")
+        inst = s.update(s.get("default"), backend="pixi", profile="lab", workspace="/home/me/w",
+                        data=[DataDir("ccdrn", "/media/x", True)])
+        with mock.patch.object(recipe, "ROOT_LOCK", self.tmp / "pixi.lock"), \
+             mock.patch.object(recipe, "env_manifest", lambda env, name: f"# {env} {name}\n"):
+            (self.tmp / "pixi.lock").write_text(LOCK)
+            r = recipe.capture_recipe(inst)
+        self.assertEqual(r.settings["profile"], "lab")
+        self.assertNotIn("workspace", r.settings)        # machine paths don't travel
+        self.assertEqual(r.data, [{"name": "ccdrn", "ro": True}])
+        self.assertEqual(r.manifest, "# lab default\n")
+        self.assertIn("wbw-linux", r.lock)
+        # now the instance owns an env: capture reads it back verbatim
+        recipe.write_env_project(inst, "M\n", "L\n")
+        self.assertTrue(recipe.owns_env(inst))
+        self.assertEqual((recipe.capture_recipe(inst).manifest, recipe.capture_recipe(inst).lock), ("M\n", "L\n"))
+
+    def _exported(self):
+        from gdl import recipe
+        s = Settings(self.toml)
+        s.new_instance("default")
+        inst = s.update(s.get("default"), backend="pixi", profile="lab", workspace="/home/me/w",
+                        data=[DataDir("ccdrn", "/media/x", True), DataDir("lidar", "/media/y")])
+        recipe.write_env_project(inst, "MANIFEST\n", "LOCK\n")
+        path = recipe.export_recipe(inst, self.tmp, label="before update")
+        return s, path
+
+    def test_export_then_import(self):
+        from gdl import recipe
+        s, path = self._exported()
+        self.assertEqual(path.name, "default.gdlenv.toml")
+        r = recipe.Recipe.load(path)
+        self.assertEqual((r.label, r.lock), ("before update", "LOCK\n"))
+        inst = recipe.import_recipe(s, r, "copy", "~/elsewhere", {"ccdrn": "/mnt/c", "lidar": ""})
+        self.assertEqual((inst.backend, inst.profile), ("pixi", "lab"))
+        self.assertEqual(inst.workspace, str(Path.home() / "elsewhere"))
+        self.assertEqual([(d.name, d.path, d.ro) for d in inst.data], [("ccdrn", "/mnt/c", True)])  # lidar skipped
+        self.assertNotEqual(inst.port, s.get("default").port)
+        self.assertEqual((inst.state_dir / "env" / "pixi.lock").read_text(), "LOCK\n")
+        with self.assertRaises(GdlError):  # name taken
+            recipe.import_recipe(s, r, "copy", "/w")
+
+    def test_cli_export_import(self):
+        from gdl import __main__ as cli
+        p = mock.patch.object(cli, "migrate_legacy", lambda: False)  # never touch a real .geodatalab
+        p.start()
+        self.addCleanup(p.stop)
+        s, path = self._exported()
+        out = self.tmp / "out"
+        out.mkdir()
+        self.assertEqual(cli.main(["export", str(out), "--label", "x"]), 0)
+        self.assertTrue((out / "default.gdlenv.toml").exists())
+        self.assertEqual(cli.main(["import", str(out / "default.gdlenv.toml"), "--name", "imp",
+                                   "--workspace", "/w", "--data", "lidar=/l"]), 0)
+        imp = Settings(self.toml).get("imp")
+        self.assertEqual([d.name for d in imp.data], ["lidar"])
+        self.assertTrue((imp.state_dir / "env" / "pixi.toml").exists())
+
+    def test_wizard_imports_recipe(self):
+        import asyncio
+        from textual.widgets import Input, Select
+        from gdl.tui import GeodatalabApp
+        s, path = self._exported()
+        built = []
+
+        async def go():
+            app = GeodatalabApp()
+            app.action_build = lambda: built.append(app.current)
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                await pilot.press("n")
+                await pilot.pause()
+                for ch in "fromrec":
+                    await pilot.press(ch)
+                app.screen.query_one("#type", Select).value = "recipe"
+                await pilot.click("#next")
+                await pilot.pause()
+                app.screen.query_one("#recipe-path", Input).value = str(path)
+                await pilot.pause()
+                self.assertIn("profile lab", str(app.screen.query_one("#recipe-info").render()))
+                app.screen.query_one("#r-workspace", Input).value = "/w"
+                app.screen.query_one("#rd-0", Input).value = "/data/c"
+                await pilot.click("#ok")
+                await pilot.pause()
+            imp = Settings(self.toml).get("fromrec")
+            self.assertEqual([(d.name, d.path) for d in imp.data], [("ccdrn", "/data/c")])
+            self.assertEqual(built, ["fromrec"])
+        asyncio.run(go())
+
+    def test_pixi_backend_follows_own_env(self):
+        from gdl import recipe
+        from gdl.backends import Pixi
+        s = Settings(self.toml)
+        s.new_instance("default")
+        inst = s.update(s.get("default"), backend="pixi", profile="lab")
+        be = Pixi(s, inst)
+        self.assertEqual(be.project(), (Pixi.MANIFEST, "lab"))
+        self.assertEqual(be.label(), "pixi:lab")
+        recipe.write_env_project(inst, "M\n", "L\n")
+        own = inst.state_dir / "env"
+        self.assertEqual(be.project(), (own / "pixi.toml", "default"))
+        self.assertEqual(be.prefix(), own / ".pixi" / "envs" / "default")
+        self.assertIn(str(own / "pixi.toml"), be._in_env(inst, "jupyter"))
+        self.assertIn("own env", be.label())
+        # a profile change drops the own env and goes back to the shared one
+        s.update(inst, profile="kitchen")
+        with mock.patch.object(Pixi, "_check_platform", lambda self, i: None), \
+             mock.patch.object(Pixi, "_gen", lambda self: mock.Mock(main=lambda a: 0)), \
+             mock.patch("gdl.backends.run") as run, \
+             mock.patch.object(Pixi, "_post_install", lambda *a: None), \
+             mock.patch.object(Pixi, "LOCK", self.tmp / "pixi.lock"):
+            (self.tmp / "pixi.lock").write_text("x")
+            be.build(lambda _: None)
+        self.assertFalse(own.exists())
+        self.assertEqual(be.project(), (Pixi.MANIFEST, "kitchen"))
+        self.assertIn("kitchen", run.call_args[0][0])
+
+
+class TestMonitor(unittest.TestCase):
+    def test_sizes(self):
+        from gdl.monitor import human, parse_size
+        self.assertEqual(parse_size("12MiB"), 12 * 2**20)
+        self.assertEqual(parse_size(" 1.5GB "), int(1.5 * 2**30))
+        self.assertEqual(parse_size("512kB"), 512 * 1024)
+        self.assertEqual(parse_size("--"), 0)
+        self.assertEqual(human(3 * 2**30), "3.0 GB")
+
+    def test_probe_tree_and_kernel_id(self):
+        import subprocess
+        from gdl.probe import snapshot
+        kid = "352bcffd-b3ae-40a7-bedd-da0573a8d894"
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
+                                  "-f", f"/tmp/kernel-{kid}.json"])
+        try:
+            snap = snapshot(os.getpid(), interval=0.1)
+        finally:
+            child.kill()
+        row = next(p for p in snap["procs"] if p["pid"] == child.pid)
+        self.assertEqual(row["kernel"], kid)
+        self.assertGreater(snap["mem_limit"], 0)
+
+    def test_kernels_get_notebook_names(self):
+        from gdl import monitor
+        be = mock.Mock(inst=mock.Mock(port=1, **{"name": "x"}), **{"token.return_value": "t"})
+        procs = [{"pid": 7, "kernel": "k1", "cpu": 50.0, "rss": 10}]
+        with mock.patch.object(monitor, "sessions", return_value={"k1": {"path": "a.ipynb", "state": "busy"}}):
+            rows = monitor.Monitor()._kernels(be, procs)
+        self.assertEqual(rows[0]["path"], "a.ipynb")
+        self.assertEqual(rows[0]["pid"], 7)
 
 
 if __name__ == "__main__":
