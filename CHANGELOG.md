@@ -2,7 +2,7 @@
 
 All notable changes to geodatalab. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are when the change was made.
 
-## [Unreleased]
+## v0.3 "After Hours"
 
 ### Added
 - **GDL Settings** tab (far right, next to GDL Tools and GDL Activity): settings for the manager itself, for every instance.
